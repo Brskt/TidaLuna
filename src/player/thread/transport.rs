@@ -299,9 +299,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // paused seek starts at that target, not at zero.
             crate::vprintln!("[PLAY]   start at {:.1}s", self.effective_position());
         }
-        // A prior device-loss recovery may have torn down the stream (e.g. the device
-        // was held exclusively by a fullscreen game). Resuming is a natural retry point:
-        // rebuild on the current default device, which is usually free again by now.
+        // A device loss or a refused rebuild left no stream. Resuming is the retry point: the
+        // selected device reopens, or reports `devicenotfound` if it is still gone.
         if self.cpal_stream.is_none() {
             self.recover_audio_device();
         } else {

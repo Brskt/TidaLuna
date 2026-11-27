@@ -3,8 +3,49 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use super::mixer::{CrossfadeLink, OutputGain, build_cpal_callback};
-use super::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_UNKNOWN};
+use super::{STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST, STREAM_ERR_UNKNOWN};
 use crate::player::{AudioDevice, DeviceErrorKind};
+
+/// What a cpal stream error says about the output it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::player::thread) enum StreamFault {
+    /// The OS moved a default-following stream to the new default; the stream lives on.
+    Rerouted,
+    /// The default changed to nothing: no output is left to follow.
+    DefaultGone,
+    /// The stream's own device is gone or its stream invalidated.
+    Lost,
+    Unknown,
+}
+
+/// cpal's own rule since its PR #1350 (`default_device_change_error`), which the pinned rev
+/// predates: a default change with no default left is no reroute. `default_exists` is asked
+/// only then.
+pub(in crate::player::thread) fn classify_stream_error(
+    kind: cpal::ErrorKind,
+    default_exists: impl FnOnce() -> bool,
+) -> StreamFault {
+    match kind {
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+            StreamFault::Lost
+        }
+        cpal::ErrorKind::DeviceChanged if default_exists() => StreamFault::Rerouted,
+        cpal::ErrorKind::DeviceChanged => StreamFault::DefaultGone,
+        _ => StreamFault::Unknown,
+    }
+}
+
+/// Hand a fault to the player thread's next drain. A stronger fault is never overwritten: the
+/// lost default's own render error follows it by milliseconds, as an unknown one.
+pub(in crate::player::thread) fn record_stream_fault(flag: &AtomicU8, fault: StreamFault) {
+    let code = match fault {
+        StreamFault::Rerouted => return,
+        StreamFault::DefaultGone => STREAM_ERR_DEFAULT_GONE,
+        StreamFault::Lost => STREAM_ERR_DEVICE_LOST,
+        StreamFault::Unknown => STREAM_ERR_UNKNOWN,
+    };
+    flag.fetch_max(code, Relaxed);
+}
 
 /// Why an output would not open, as cpal's build error tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +75,19 @@ pub(in crate::player::thread) fn classify_open_error(kind: cpal::ErrorKind) -> O
         cpal::ErrorKind::DeviceNotAvailable => OpenFailure::Gone,
         cpal::ErrorKind::DeviceBusy => OpenFailure::Busy,
         _ => OpenFailure::Other,
+    }
+}
+
+/// Whether the OS has a default output right now. Only WASAPI reports a lost default as a
+/// default change; CoreAudio sends `DeviceNotAvailable` there and ALSA sends neither.
+pub(in crate::player::thread) fn default_output_exists() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        cpal::default_host().default_output_device().is_some()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
     }
 }
 
@@ -204,21 +258,19 @@ fn open_with_config(
     let stream = device.build_output_stream(
         *config,
         cb,
-        move |err: cpal::Error| match err.kind() {
-            // Default device changed: cpal auto-rerouted the live stream. Informational only;
-            // must NOT write the flag, or it could clear a device-loss signal set moments earlier.
-            cpal::ErrorKind::DeviceChanged => {
-                crate::vprintln!("[CPAL]   Auto-rerouted to new default device");
+        move |err: cpal::Error| {
+            let fault = classify_stream_error(err.kind(), default_output_exists);
+            match fault {
+                StreamFault::Rerouted => {
+                    crate::vprintln!("[CPAL]   Auto-rerouted to new default device");
+                }
+                StreamFault::DefaultGone => {
+                    crate::vprintln!("[CPAL]   Default output gone, none left: {err}");
+                }
+                StreamFault::Lost => crate::vprintln!("[CPAL]   Stream error (device lost): {err}"),
+                StreamFault::Unknown => crate::vprintln!("[CPAL]   Stream error: {err}"),
             }
-            // Device lost / stream invalidated: rebuild on the current default device.
-            cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
-                crate::vprintln!("[CPAL]   Stream error (device lost): {err}");
-                err_flag.store(STREAM_ERR_DEVICE_LOST, Relaxed);
-            }
-            _ => {
-                crate::vprintln!("[CPAL]   Stream error: {err}");
-                err_flag.store(STREAM_ERR_UNKNOWN, Relaxed);
-            }
+            record_stream_fault(&err_flag, fault);
         },
         None,
     )?;

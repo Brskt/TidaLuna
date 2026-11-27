@@ -4,11 +4,105 @@
 
 use super::{PlayAction, decide_play};
 use crate::player::thread::DecodeEvent;
-use crate::player::thread::harness::{harness, last_state, local_stop};
-use crate::player::{PlaybackState, PlayerCommand, PlayerEvent};
+use crate::player::thread::harness::{fault_flag, harness, last_state, local_stop};
+use crate::player::{DeviceErrorKind, PlaybackState, PlayerCommand, PlayerEvent};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+
+/// A device lost under playback, named or the last default, pauses, reports it once and hands the
+/// page the new list; reopening it would answer a `devicenotfound` the official app never shows.
+/// Its fault goes with the stream, or the next tick reports again.
+#[test]
+fn a_lost_device_pauses_reports_once_and_lists_the_devices_again() {
+    use crate::player::thread::output::{STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST};
+    for (is_default, fault) in [
+        (false, STREAM_ERR_DEVICE_LOST),
+        (true, STREAM_ERR_DEFAULT_GONE),
+    ] {
+        let mut h = harness();
+        if !is_default {
+            h.player.current_device_id = Some("Speakers (Gone DAC)".to_string());
+        }
+        h.player.output_is_default = is_default;
+        h.player.default_output_present = || false;
+        h.player.cpal_stream_error = fault_flag(fault);
+
+        h.player.poll_playback();
+
+        let events = h.events.lock().unwrap();
+        let errors: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, PlayerEvent::DeviceError(_)))
+            .collect();
+        assert!(
+            matches!(
+                errors[..],
+                [PlayerEvent::DeviceError(DeviceErrorKind::Disconnected)]
+            ),
+            "default {is_default}: the page did not hear exactly one NPD01: {errors:?}"
+        );
+        let disconnected = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::DeviceError(_)));
+        let listed = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::AudioDevices(_, None)));
+        assert!(
+            listed > disconnected,
+            "default {is_default}: the page was not handed the list without the device"
+        );
+        drop(events);
+        assert_eq!(
+            last_state(&h.events),
+            Some(PlaybackState::Paused),
+            "default {is_default}: playback went on without its device"
+        );
+        assert!(
+            h.player.cpal_stream_error.is_none(),
+            "default {is_default}: the dead stream's fault outlived it"
+        );
+    }
+}
+
+/// A lost output with a default still listed reopens on its own, and nobody asked: one that
+/// will not open yet reads as the loss alone, paused, never as playing on no stream.
+#[test]
+fn a_reopen_that_fails_after_a_loss_reports_the_loss_once_and_pauses() {
+    use crate::player::thread::output::{STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST};
+    for fault in [STREAM_ERR_DEVICE_LOST, STREAM_ERR_DEFAULT_GONE] {
+        let mut h = harness();
+        h.player.current_buffer =
+            Some(crate::player::buffer::RamBuffer::from_complete(vec![0; 16]));
+        // Listed when checked, unopenable by the open: an absent named device resolves to nothing.
+        h.player.current_device_id = Some("Speakers (Gone DAC)".to_string());
+        h.player.output_is_default = true;
+        h.player.default_output_present = || true;
+        h.player.cpal_stream_error = fault_flag(fault);
+
+        h.player.poll_playback();
+
+        let events = h.events.lock().unwrap();
+        let errors: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, PlayerEvent::DeviceError(_)))
+            .collect();
+        assert!(
+            matches!(
+                errors[..],
+                [PlayerEvent::DeviceError(DeviceErrorKind::Disconnected)]
+            ),
+            "fault {fault}: the page did not hear the loss alone: {errors:?}"
+        );
+        drop(events);
+        assert!(!h.player.is_playing, "fault {fault}: playing on no stream");
+        assert_eq!(
+            last_state(&h.events),
+            Some(PlaybackState::Paused),
+            "fault {fault}: the page still reads playing"
+        );
+    }
+}
 
 /// A stop says `stopped` alone, as the official engine's does: a `paused` after the SDK's reset
 /// rewrites its IDLE, and the next Play is refused with "No active player" instead of reloading.

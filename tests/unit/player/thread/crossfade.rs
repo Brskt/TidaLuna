@@ -3,7 +3,7 @@
 
 use super::IncomingFailure;
 use crate::player::thread::DecodeCommand;
-use crate::player::thread::harness::{Harness, harness};
+use crate::player::thread::harness::{Harness, fault_flag, harness};
 use crate::player::{LoadRequest, PlaybackState, PlayerEvent, ResumePolicy};
 use crate::state::current_track_fixture::CurrentTrackSlot;
 use std::sync::atomic::AtomicBool;
@@ -445,6 +445,66 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
             .iter()
             .any(|ev| matches!(ev, PlayerEvent::NetworkLost { .. })),
         "a skip is not a failure: promoting for one must report nothing, got {events:?}"
+    );
+}
+
+/// A lost output takes the stream the fade was mixing on. Left pending, the fade holds the
+/// track's end for a promotion no callback will ever make, and the queue stops there.
+#[test]
+fn a_lost_output_cancels_the_fade_it_carried() {
+    use crate::player::thread::output::{STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST};
+    let _slot = CurrentTrackSlot::clear();
+    for (fault, default_present) in [
+        (STREAM_ERR_DEVICE_LOST, (|| false) as fn() -> bool),
+        (STREAM_ERR_DEFAULT_GONE, || true),
+    ] {
+        let mut h = harness();
+        let incoming = arm_for_promotion(&mut h, 246.0);
+        // The harness holds no buffer and the device is named and absent: nothing opens one.
+        h.player.current_device_id = Some("Speakers (Gone DAC)".to_string());
+        h.player.output_is_default = false;
+        h.player.default_output_present = default_present;
+        h.player.cpal_stream_error = fault_flag(fault);
+
+        h.player.poll_playback();
+
+        assert!(
+            h.player.pending_crossfade.is_none(),
+            "fault {fault}: the fade outlived its stream"
+        );
+        assert!(
+            incoming
+                .try_iter()
+                .any(|c| matches!(c, DecodeCommand::Stop)),
+            "fault {fault}: the incoming decoder was left running"
+        );
+    }
+}
+
+/// A fade the callback already finished is the track the listener hears: the loss promotes it
+/// first, or its `active` lands after the loss's `paused` and names a paused track playing.
+#[test]
+fn a_lost_output_promotes_a_finished_fade_before_it_pauses() {
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness();
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(finished_fade_link());
+    h.player.current_device_id = Some("Speakers (Gone DAC)".to_string());
+    h.player.output_is_default = false;
+    h.player.cpal_stream_error = fault_flag(crate::player::thread::output::STREAM_ERR_DEVICE_LOST);
+
+    h.player.poll_playback();
+
+    let events = h.events.lock().unwrap();
+    let promoted = events
+        .iter()
+        .position(|e| matches!(e, PlayerEvent::CrossfadePromoted(..)));
+    let paused = events
+        .iter()
+        .position(|e| matches!(e, PlayerEvent::StateChange(PlaybackState::Paused, _)));
+    assert!(
+        promoted.is_some() && promoted < paused,
+        "the promotion did not come before the pause: {events:?}"
     );
 }
 

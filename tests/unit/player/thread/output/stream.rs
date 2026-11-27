@@ -1,6 +1,28 @@
 //! Tests for `src/player/thread/output/stream.rs`, attached to it by `#[path]`.
 
-use super::attempt_order;
+use super::{StreamFault, attempt_order, record_stream_fault};
+use crate::player::thread::output::{
+    STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN,
+};
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::Relaxed;
+
+/// The `Other` that follows a lost default right after must not turn the loss into an unknown
+/// error: the page would show NPD-unknown instead of NPD01.
+#[test]
+fn a_weaker_stream_fault_never_replaces_a_stronger_one() {
+    let flag = AtomicU8::new(STREAM_ERR_NONE);
+    record_stream_fault(&flag, StreamFault::DefaultGone);
+    record_stream_fault(&flag, StreamFault::Unknown);
+    assert_eq!(flag.load(Relaxed), STREAM_ERR_DEFAULT_GONE);
+    record_stream_fault(&flag, StreamFault::Lost);
+    record_stream_fault(&flag, StreamFault::DefaultGone);
+    assert_eq!(flag.load(Relaxed), STREAM_ERR_DEVICE_LOST);
+
+    let flag = AtomicU8::new(STREAM_ERR_NONE);
+    record_stream_fault(&flag, StreamFault::Unknown);
+    assert_eq!(flag.load(Relaxed), STREAM_ERR_UNKNOWN);
+}
 
 /// The order the stream is opened in decides who resamples. On Windows shared mode and
 /// on macOS the device's default IS the rate the audio server runs at; targeting it

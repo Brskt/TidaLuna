@@ -106,6 +106,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 return;
             }
         }
+        // A failed rebuild leaves the dead stream's link behind; no callback mixes a fade on it.
+        if self.cpal_stream.is_none() {
+            return;
+        }
         let Some(xfade) = self.cpal_xfade.clone() else {
             return;
         };

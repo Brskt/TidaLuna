@@ -17,6 +17,57 @@ use crate::player::wasapi::ExclusiveHandle;
 #[cfg(any(target_os = "windows", test))]
 use crate::state::RetainedTrack;
 
+/// What decides whether a default that appeared reopens a System Default output lost with no
+/// device left; named fields keep two of them from trading places unseen.
+#[derive(Clone, Copy)]
+pub(super) struct ReopenFacts {
+    /// The loss that left no device armed the reopen, and nothing took it since.
+    pub(super) armed: bool,
+    pub(super) stream_open: bool,
+    pub(super) output_is_default: bool,
+    pub(super) has_track: bool,
+    /// A Play with no device announced Active then NotFound; the SDK answers with a STOP.
+    pub(super) is_playing: bool,
+    /// A load opens its own stream.
+    pub(super) load_in_flight: bool,
+    pub(super) orphaned: bool,
+    /// Exclusive or ASIO holds the output, or a switch is parked behind a teardown.
+    pub(super) bypass_busy: bool,
+}
+
+impl ReopenFacts {
+    pub(super) fn allow(self) -> bool {
+        self.armed
+            && !self.stream_open
+            && self.output_is_default
+            && self.has_track
+            && !self.is_playing
+            && !self.load_in_flight
+            && !self.orphaned
+            && !self.bypass_busy
+    }
+}
+
+/// Who asked for an output to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpenBy {
+    /// The page, or a rebuild it is owed an answer for.
+    Request,
+    /// `reopen_lost_default_output`, on a device event nobody asked about.
+    AutoReopen,
+}
+
+impl OpenBy {
+    /// Whether a failed open reaches the listener. An automatic reopen stays armed and silent
+    /// instead: the next device event or Play retries, and nobody asked for it.
+    pub(super) fn reports_failure(self) -> bool {
+        match self {
+            Self::Request => true,
+            Self::AutoReopen => false,
+        }
+    }
+}
+
 /// How a mode switch brings back the track it tears down.
 ///
 /// The bytes in memory are asked first. A whole track restarts on them at the live position,
@@ -164,7 +215,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     .and_then(|tid| self.resume_store.get(tid))
             })
             .unwrap_or(0.0);
-        match self.rebuild_held_pipeline(seek_to) {
+        match self.rebuild_held_pipeline(seek_to, OpenBy::Request) {
             Ok(()) => {}
             Err(kind) if released => self.end_failed_track(
                 "shared output refused a released track".into(),
@@ -301,7 +352,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         self.current_device_id = Some(id.clone());
-        self.rebuild_pipeline_at(self.effective_position());
+        self.rebuild_pipeline_at(self.effective_position(), OpenBy::Request);
         crate::vprintln!("[AUDIO] Switched to device: {}", id);
     }
 
@@ -581,37 +632,107 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// `position`, preserving play state. No-op when no track is loaded. Shared by
     /// manual device switching and device-loss recovery. A refused rebuild leaves the track
     /// held: the listener's next Play rebuilds again (`recover_audio_device`).
-    fn rebuild_pipeline_at(&mut self, position: f64) {
+    fn rebuild_pipeline_at(&mut self, position: f64, by: OpenBy) {
         if !self.has_track {
             return;
         }
-        if let Err(kind) = self.rebuild_held_pipeline(position) {
+        if let Err(kind) = self.rebuild_held_pipeline(position, by) {
             crate::vprintln!("[AUDIO] rebuild refused ({}); Play retries", kind.as_str());
         }
     }
 
     /// Rebuild the held buffer's pipeline at `position`. The error is the device failure
-    /// already reported.
-    fn rebuild_held_pipeline(&mut self, position: f64) -> Result<(), DeviceErrorKind> {
+    /// already reported, unless `by` keeps it silent.
+    fn rebuild_held_pipeline(&mut self, position: f64, by: OpenBy) -> Result<(), DeviceErrorKind> {
         let was_playing = self.is_playing;
         // Sampled before stop_decode() clears it, like was_playing: only a rebuild that
         // interrupted a real transport seek may re-announce one.
         let was_seeking = self.seeking;
         self.stop_decode();
         self.cpal_stream = None;
+        // After the drop, which joins cpal's thread: nothing writes the old flag past this.
+        self.cpal_stream_error = None;
         match self.current_buffer.clone() {
             Some(buffer) => {
-                self.rebuild_pipeline_on_device(buffer, was_playing, was_seeking, position)
+                self.rebuild_pipeline_on_device(buffer, was_playing, was_seeking, position, by)
             }
             None => Ok(()),
         }
     }
 
-    /// Recovery path for device loss/invalidation (cpal `DeviceNotAvailable`/
-    /// `StreamInvalidated`): rebuild on the current default device at the last-heard
-    /// position. cpal only auto-reroutes on a default-device *change*, not on loss.
+    /// Rebuild a torn-down pipeline on the selected device at the last-heard position.
     pub(super) fn recover_audio_device(&mut self) {
-        self.rebuild_pipeline_at(self.effective_position());
+        self.rebuild_pipeline_at(self.effective_position(), OpenBy::Request);
+    }
+
+    /// The output died under the stream. A System Default output then reopens unprompted, now
+    /// on a default that exists or else on the next one to appear: the SDK's own pick of it is
+    /// a no-op, and nobody waits on that answer.
+    pub(super) fn handle_device_lost(&mut self) {
+        self.report_device_lost();
+        self.reopen_lost_default_output();
+    }
+
+    /// As the official engine: pause, report the loss once, list the devices again. The dead
+    /// stream goes, and a System Default output is armed to reopen.
+    fn report_device_lost(&mut self) {
+        // Before the pause: a fade the callback finished promotes here, and its `active` would
+        // otherwise follow the `paused`.
+        self.cancel_crossfade();
+        if self.is_playing {
+            self.handle_pause();
+        }
+        (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Disconnected));
+        self.handle_get_audio_devices(None);
+        self.cpal_stream = None;
+        // After the drop, which joins cpal's thread: a late fault would report twice.
+        self.cpal_stream_error = None;
+        self.reopen_default_on_arrival = self.output_is_default;
+    }
+
+    /// cpal saw the default change to nothing. Asked again here, later than on cpal's thread:
+    /// a default there now took the stream, as Windows' own reroute does, and the output moves to
+    /// it in case the stream died meanwhile. None left, or one that will not open, is a loss.
+    pub(super) fn handle_default_output_gone(&mut self) {
+        self.cancel_crossfade();
+        if !(self.default_output_present)() {
+            self.handle_device_lost();
+        } else if self.has_track
+            && self
+                .rebuild_held_pipeline(self.effective_position(), OpenBy::AutoReopen)
+                .is_err()
+        {
+            // The open just failed: the next device event retries, not this same moment.
+            self.report_device_lost();
+        }
+    }
+
+    /// Reopen, paused, a System Default output lost with no device left, once a default appears:
+    /// the official engine re-inits there unprompted. The loss stays armed until an open works,
+    /// since Windows orders neither its events nor the default's readiness.
+    pub(super) fn reopen_lost_default_output(&mut self) {
+        #[cfg(target_os = "windows")]
+        let bypass_busy = self.is_exclusive_mode
+            || self.is_asio_mode
+            || self.asio_teardown.is_some()
+            || self.pending_device_switch.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let bypass_busy = false;
+        let facts = ReopenFacts {
+            armed: self.reopen_default_on_arrival,
+            stream_open: self.cpal_stream.is_some(),
+            output_is_default: self.output_is_default,
+            has_track: self.has_track,
+            is_playing: self.is_playing,
+            load_in_flight: self.loading_gen.is_some(),
+            orphaned: self.orphaned,
+            bypass_busy,
+        };
+        if !facts.allow() || !(self.default_output_present)() {
+            return;
+        }
+        self.cancel_crossfade();
+        self.rebuild_pipeline_at(self.effective_position(), OpenBy::AutoReopen);
     }
 
     fn rebuild_pipeline_on_device(
@@ -620,6 +741,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         was_playing: bool,
         was_seeking: bool,
         seek_to: f64,
+        by: OpenBy,
     ) -> Result<(), DeviceErrorKind> {
         // Track unchanged on a switch/recovery: the format is known. Re-probing
         // here would block the player thread on a mid-stream buffer, which means
@@ -628,13 +750,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let sr = self.sample_rate;
         let ch = self.channels;
 
-        let device = self.resolve_output_device()?;
+        let device = self.resolve_output_device(by)?;
 
         let opened = match open_output_stream(&device, sr, ch, &self.output_gain()) {
             Ok(o) => o,
             Err(failure) => {
                 let kind = failure.device_error();
-                (self.callback)(PlayerEvent::DeviceError(kind));
+                if by.reports_failure() {
+                    (self.callback)(PlayerEvent::DeviceError(kind));
+                }
                 return Err(kind);
             }
         };
@@ -677,16 +801,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             seek_gen: opened.seek_gen,
             reader_cancel,
         }) else {
-            // This function's own convention on failure: report the device and leave, rather
-            // than install a pipeline whose decoder does not exist.
+            // Reported like the open's other failures, unless `by` keeps it silent; nothing is
+            // installed, since a pipeline whose decoder does not exist would play nothing.
             let kind = DeviceErrorKind::Unknown;
-            (self.callback)(PlayerEvent::DeviceError(kind));
+            if by.reports_failure() {
+                (self.callback)(PlayerEvent::DeviceError(kind));
+            }
             return Err(kind);
         };
 
         let stream = opened.stream;
 
         self.cpal_stream = Some(stream);
+        // An output is open again: the loss that armed a reopen is behind it.
+        self.reopen_default_on_arrival = false;
         self.decode_cmd_tx = Some(decode_cmd_tx);
         self.decode_event_rx = Some(decode_event_rx);
         self.decode_handle = Some(decode_handle);
@@ -700,7 +828,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Minted before the borrow below: a rebuild's reposition is a seek like any other,
         // and its ack has to be attributable or the settle below never closes.
         let rebuild_gen = self.next_seek_gen();
-        if seek_to > 0.0
+        // A fresh decoder already stands at 0, but an interrupted seek there still needs the ack
+        // that settles it.
+        if (seek_to > 0.0 || was_seeking)
             && let Some(ref tx) = self.decode_cmd_tx
         {
             let _ = tx.send(DecodeCommand::Seek(seek_to, rebuild_gen));
@@ -721,22 +851,27 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         Ok(())
     }
 
-    /// Resolve the configured output device (falling back to the OS default) and
-    /// record its concrete name in `current_output_name`, which the shared
-    /// re-assert guard compares against. Every cpal-open path resolves through here. The error is
-    /// the failure already reported, for a caller that ends the track on it to name.
-    pub(super) fn resolve_output_device(&mut self) -> Result<cpal::Device, DeviceErrorKind> {
+    /// Resolve the configured output device and record its concrete name in `current_output_name`,
+    /// which the shared re-assert guard compares against. Every cpal-open path resolves here; the
+    /// error is already reported unless `by` keeps it silent; a caller ending the track names it.
+    pub(super) fn resolve_output_device(
+        &mut self,
+        by: OpenBy,
+    ) -> Result<cpal::Device, DeviceErrorKind> {
+        // The request's class, found or not: a named pick that found nothing is no default.
+        self.output_is_default = self
+            .current_device_id
+            .as_deref()
+            .is_none_or(super::output::is_default_selector);
         match super::output::resolve_device(self.current_device_id.as_deref()) {
             Some(d) => {
                 self.current_output_name = super::output::output_device_name(&d);
-                self.output_is_default = self
-                    .current_device_id
-                    .as_deref()
-                    .is_none_or(super::output::is_default_selector);
                 Ok(d)
             }
             None => {
-                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
+                if by.reports_failure() {
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
+                }
                 Err(DeviceErrorKind::NotFound)
             }
         }

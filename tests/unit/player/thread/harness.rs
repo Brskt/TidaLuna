@@ -80,6 +80,11 @@ pub(super) fn last_state(events: &Spy) -> Option<PlaybackState> {
     })
 }
 
+/// The output's error flag as its stream callback leaves it after a fault of `code`.
+pub(super) fn fault_flag(code: u8) -> Option<Arc<std::sync::atomic::AtomicU8>> {
+    Some(Arc::new(std::sync::atomic::AtomicU8::new(code)))
+}
+
 pub(super) fn load_req_of(
     buffer: crate::player::buffer::RamBuffer,
     seq: u32,

@@ -1,5 +1,7 @@
 use super::crossfade::IncomingFailure;
-use super::output::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN};
+use super::output::{
+    STREAM_ERR_DEFAULT_GONE, STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN,
+};
 use super::{DecodeEvent, PlayerThread};
 use crate::player::{DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent, format_ms};
 use std::sync::atomic::Ordering::Relaxed;
@@ -131,12 +133,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             .cpal_stream_error
             .as_ref()
             .map_or(STREAM_ERR_NONE, |flag| flag.swap(STREAM_ERR_NONE, Relaxed));
-        if stream_err_code == STREAM_ERR_DEVICE_LOST {
-            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Disconnected));
-            // Device lost / invalidated: rebuild on the current default device.
-            self.recover_audio_device();
-        } else if stream_err_code == STREAM_ERR_UNKNOWN {
-            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
+        match stream_err_code {
+            STREAM_ERR_DEVICE_LOST => self.handle_device_lost(),
+            STREAM_ERR_DEFAULT_GONE => self.handle_default_output_gone(),
+            STREAM_ERR_UNKNOWN => {
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
+            }
+            _ => {}
         }
 
         // The decode thread answers a seek while paused: it dequeues the command, seeks, and

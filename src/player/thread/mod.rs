@@ -245,9 +245,14 @@ pub(super) struct PlayerThread<F> {
     // Concrete name of the open cpal device: the shared re-assert guard
     // compares physical identity, not the raw id the load path never stores.
     current_output_name: Option<String>,
-    // Did the open stream come from a default selector ("auto"/"default"/none)?
-    // On Windows it follows the OS default; a named stream is pinned.
+    // Is the requested output, found or not, a default selector ("auto"/"default"/none)?
+    // On Windows it follows the OS default; a named output is pinned.
     output_is_default: bool,
+    // Asks the OS whether a default output exists; a seam for a test to say there is none.
+    default_output_present: fn() -> bool,
+    // A System Default output was lost with no device left: the next default to appear is
+    // reopened, paused, once (`reopen_lost_default_output`), as the official engine re-inits.
+    reopen_default_on_arrival: bool,
     // Whose music the events are about, read by the `Player`'s callback as each one is emitted:
     // set by the load that committed it, a stop's owners, a re-assert of the page's track.
     event_owner: Arc<crate::player::OriginCell>,
@@ -463,6 +468,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_device_id: None,
             current_output_name: None,
             output_is_default: false,
+            default_output_present: output::default_output_exists,
+            reopen_default_on_arrival: false,
             event_owner: Arc::new(crate::player::OriginCell::new(
                 crate::player::LoadOrigin::Local,
             )),
@@ -753,6 +760,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::GetAudioDevices(req_id) => self.handle_get_audio_devices(req_id),
             PlayerCommand::DevicesChanged => {
                 self.handle_get_audio_devices(None);
+                self.reopen_lost_default_output();
             }
             PlayerCommand::SetAudioDevice { id, mode } => {
                 self.handle_set_audio_device(id, mode);

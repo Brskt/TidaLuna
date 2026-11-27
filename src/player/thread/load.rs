@@ -357,7 +357,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         // Open cpal stream
-        let device = match self.resolve_output_device() {
+        let device = match self.resolve_output_device(super::device::OpenBy::Request) {
             Ok(d) => d,
             Err(kind) => {
                 self.end_failed_track(
@@ -399,6 +399,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.cpal_muted = Some(opened.muted);
         self.cpal_mute_ack = Some(opened.mute_ack);
         self.cpal_stream_error = Some(opened.stream_error);
+        // An output is open again: the loss that armed a reopen is behind it.
+        self.reopen_default_on_arrival = false;
         self.played_samples = opened.played_samples;
         self.cpal_xfade = Some(opened.xfade);
         // A fresh stream starts its own generation count at zero.

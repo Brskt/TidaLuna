@@ -10,15 +10,17 @@ pub(super) use resample::AudioPipeline;
 pub(in crate::player) use stream::find_output_device;
 pub(crate) use stream::is_default_selector;
 pub(super) use stream::{
-    ENGINE_RATE_IS_PINNED, enumerate_audio_devices, open_output_stream, output_device_name,
-    resolve_device, resolved_device_name,
+    ENGINE_RATE_IS_PINNED, default_output_exists, enumerate_audio_devices, open_output_stream,
+    output_device_name, resolve_device, resolved_device_name,
 };
 
-/// `cpal_stream_error` signal codes: the cpal error callback (audio thread) stores one,
-/// `poll_playback` (player thread) reads it. `DEVICE_LOST` triggers a pipeline rebuild.
+/// `cpal_stream_error` signal codes: the cpal error callback (audio thread) records one,
+/// `poll_playback` (player thread) drains it. Ordered by strength: a fault only ever raises
+/// the code (`record_stream_fault`). A loss is never overwritten by what follows it.
 pub(super) const STREAM_ERR_NONE: u8 = 0;
-pub(super) const STREAM_ERR_DEVICE_LOST: u8 = 1;
-pub(super) const STREAM_ERR_UNKNOWN: u8 = 2;
+pub(super) const STREAM_ERR_UNKNOWN: u8 = 1;
+pub(super) const STREAM_ERR_DEFAULT_GONE: u8 = 2;
+pub(super) const STREAM_ERR_DEVICE_LOST: u8 = 3;
 
 pub(super) fn format_sample_rate(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
