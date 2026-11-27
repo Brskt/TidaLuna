@@ -24,6 +24,7 @@ import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished"
 import { bannerScreen, deliverStoreRepair, observeMutations } from "./store-repair";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followNormalization } from "./loudness";
+import { beginStateWrite, settleStateWrite, type StateWrite } from "./state-write";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
 import { watchCodecState } from "./video/codec-state";
@@ -119,11 +120,14 @@ const SEQ_EVENTS: Record<string, string> = {
     "duration": "mediaduration",
     "state": "mediastate",
 };
-const BRIDGE_TO_REDUX_STATE: Record<string, string> = {
-    "active": "PLAYING",
-    "paused": "NOT_PLAYING",
-    "completed": "IDLE",
-    "idle": "IDLE",
+// TIDAL's own value, `undefined` while its store is not published yet.
+const storePlaybackState = (): unknown => {
+    try {
+        const { store } = require("../plugins/lib/src/redux/store");
+        return store.getState()?.playbackControls?.playbackState;
+    } catch (_) {
+        return undefined;
+    }
 };
 // Mediaformat bridge: latest format data from Rust player (playbackInfo fallback)
 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
@@ -170,6 +174,9 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
         const type = event.t;
         // The SDK's native player has heard this event already (see `completed` below).
         let toNative = false;
+        // A state told to the plugins, and during a cast written into TIDAL's store, once the SDK
+        // has heard it.
+        let stateWrite: StateWrite | undefined;
         if (type === "mediaformat") {
             (window as any).__LUNAR_MEDIA_FORMAT__ = event.v;
             for (const r of _mediaFormatResolvers) r(event.v);
@@ -204,6 +211,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 if (!isStoreNotPublished(e)) throw e;
             }
         } else if (type === "state") {
+            stateWrite = beginStateWrite(event.v, !!event.cast, storePlaybackState);
             const playing = event.v === "active";
             // A cast's tracks are named in Connect's space, which is never compared with this page's:
             // under a cast no track Rust holds can be named here.
@@ -232,13 +240,6 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 }
             } else {
                 proxySetPlaying(playing);
-            }
-            const reduxState = BRIDGE_TO_REDUX_STATE[event.v as string];
-            if (reduxState) {
-                try {
-                    const { store } = require("../plugins/lib/src/redux/store");
-                    store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: reduxState });
-                } catch (_) {}
             }
             // The idle player's state, the release's Stopped among them, is not the clip's.
             if (clipActive()) reassertClipState();
@@ -295,7 +296,20 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 );
             }
         } else if (mapped) {
-            if (!toNative) bridge.trigger(mapped, event.v, event.seq);
+            try {
+                if (!toNative) bridge.trigger(mapped, event.v, event.seq);
+            } finally {
+                // Here, once the SDK has written its own: a listener of its that throws still
+                // leaves the state told.
+                if (stateWrite) {
+                    settleStateWrite(stateWrite, storePlaybackState, (action) => {
+                        try {
+                            const { store } = require("../plugins/lib/src/redux/store");
+                            store.dispatch(action);
+                        } catch (_) {}
+                    });
+                }
+            }
         } else if (type === "mediaerror" && event.v?.cause !== undefined) {
             // A device failure ended a track the SDK loaded: the device event before it already
             // reached the SDK, whose banner says why. Raw, this one would add an "unreadable file".

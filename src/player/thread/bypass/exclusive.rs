@@ -203,7 +203,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             state,
                         } => {
                             // Relayed whichever stream it describes: the retired stream's
-                            // pause is the page's only NOT_PLAYING in this mode. Only the seq
+                            // pause is the plugins' only NOT_PLAYING in this mode. Only the seq
                             // names the stream; the load that replaced it never hears it.
                             if relays_backend_state(
                                 state,

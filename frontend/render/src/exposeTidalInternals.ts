@@ -1,7 +1,7 @@
 // Runtime discovery of Redux store via React Fiber tree walk.
 // TIDAL uses Vite/Rollup - no webpack runtime, no module cache accessible.
 
-import { interceptors, putInterceptors } from "./exposeTidalInternals.patchAction";
+import { interceptors, putInterceptors, runInterceptors } from "./exposeTidalInternals.patchAction";
 
 // Best-effort module registry. Empty under Vite/Rollup - no module cache accessible.
 export const tidalModules: Record<string, object> = {};
@@ -79,38 +79,6 @@ function findStoreViaReactFiber(): any | null {
 		if (fiber.sibling) queue.push(fiber.sibling);
 	}
 	return null;
-}
-
-// Queue navigation must never be frozen by an interceptor's cancel. A plugin like
-// RealMAX cancels MOVE_* to run an async max-quality lookup, which blocks the click
-// until the network round-trip finishes. For these types we still RUN the interceptor
-// (its async re-dispatch applies the quality swap afterward) but ignore the cancel, so
-// the original move proceeds immediately and the track plays at once. ADD_NOW is left
-// cancellable: it mutates the queue, so letting both the original and the re-dispatch
-// through would double-add.
-const NON_BLOCKING_NAV: ReadonlySet<string> = new Set([
-	"playQueue/MOVE_TO",
-	"playQueue/MOVE_NEXT",
-	"playQueue/MOVE_PREVIOUS",
-]);
-
-// Run one registry's interceptors over an action; true when one cancelled it. Shared by the
-// dispatch rail and the saga-put tap, so a cancel means the same on both.
-function runInterceptors(interceptorSet: Set<Function> | undefined, action: any): boolean {
-	if (!(interceptorSet?.size > 0)) return false;
-	const payload = action.payload !== undefined ? action.payload : action;
-	for (const interceptor of interceptorSet) {
-		try {
-			const result = interceptor(payload, action.type);
-			// A cancel (true) drops the action, except queue nav, which stays
-			// instant (the interceptor re-dispatches the quality swap afterward).
-			if (result === true && !NON_BLOCKING_NAV.has(action.type)) return true;
-			if (result instanceof Promise) result.catch((err: unknown) => console.error(`[luna:redux] Interceptor error for ${action.type}:`, err));
-		} catch (e) {
-			console.error(`[luna:redux] Interceptor error for ${action.type}:`, e);
-		}
-	}
-	return false;
 }
 
 function patchDispatch(store: any): void {

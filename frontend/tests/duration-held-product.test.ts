@@ -46,17 +46,17 @@ test("a state that belongs to a cast leaves no track named: Connect's ids are no
 	expect(held()).toBeUndefined();
 });
 
-test("in a batch, the state behind a duration reads the track that duration named", () => {
+test("in a batch, the state behind a duration reads the track that duration named", async () => {
 	const read: unknown[] = [];
-	const redux = require("../plugins/lib/src/redux/store");
-	const dispatch = redux.store.dispatch;
-	redux.store.dispatch = (action: { type: string; payload?: unknown }) => {
-		if (action.type === "playbackControls/SET_PLAYBACK_STATE") read.push([action.payload, held()]);
-	};
+	const { interceptors } = await import("../render/src/exposeTidalInternals.patchAction");
+	const key = "playbackControls/SET_PLAYBACK_STATE";
+	const previous = interceptors[key];
+	// What `PlayState` reads the track through when `active` opens its segment.
+	interceptors[key] = new Set([(payload: unknown) => void read.push([payload, held()])]);
 	try {
 		push([{ t: "duration", v: 215, seq: 3, product: "9308" }, { t: "state", v: "active", seq: 3 }]);
 	} finally {
-		redux.store.dispatch = dispatch;
+		interceptors[key] = previous;
 	}
 
 	expect(read).toEqual([["PLAYING", "9308"]]);
