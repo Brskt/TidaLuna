@@ -449,11 +449,14 @@ const init = async () => {
                 case "resume":
                     break;
             }
-            // Self-load (DASH/AAC) keeps its direct path; SDK tracks go through the
-            // deduped desired-intent: a user PLAY reaches Rust even when TIDAL
-            // resumes via stop+load(same) without calling nativePlayer.play().
+            // Self-load (DASH/AAC) keeps its direct path. An SDK track's Play that TIDAL's own reload
+            // starts is left to it (`playRoute`); any other goes through the deduped intent, as TIDAL
+            // sometimes resumes via stop+load(same) without calling nativePlayer.play().
             if (isSelfLoad()) sendIpc("player.play");
-            else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
+            else {
+                const native = window.NativePlayerComponent as any;
+                if (!native?.deferToSdk?.({ castShown: castShowsModes() })) native?.setDesiredPlayback?.(true);
+            }
         });
         // During a cast the player bar shows the controller's modes: a click there asks the receiver,
         // which changes them for the phone too, and the bar follows what the cast then reports.

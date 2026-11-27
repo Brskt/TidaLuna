@@ -5,6 +5,7 @@ import { deviceReleasedToShaka, selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
 import { productOfStream, replayGainsOf } from "../sdk-playbackinfo";
 import { factorsOf } from "../loudness";
+import { playRoute } from "../play-intent";
 
 export type TrackListPayload = { position?: number | string; context?: { id?: unknown; type?: string; isAutoPlay?: boolean } } | undefined;
 
@@ -554,6 +555,27 @@ export const createNativePlayerComponent = () => {
         // Deduped play/pause intent for SDK tracks, driven by the Redux
         // playbackControls/PLAY|PAUSE interceptors (see index.ts).
         setDesiredPlayback: (playing: boolean) => setDesired(playing),
+        // The listener's Play, from TIDAL's PLAY action: true when TIDAL's own reload starts it
+        // (see `playRoute`), the intent then left unset for the delegate's play to send.
+        deferToSdk: ({ castShown }: { castShown: boolean }): boolean => {
+            let state: any;
+            try {
+                state = require("../../plugins/lib/src/redux/store").store?.getState?.();
+            } catch (_) {
+                return false;
+            }
+            const route = playRoute({
+                controls: state?.playbackControls,
+                network: state?.network,
+                queue: state?.playQueue,
+                mediaItems: state?.content?.mediaItems,
+                loadRefused,
+                castShown,
+            });
+            if (route !== "sdk") return false;
+            desiredPlaying = null;
+            return true;
+        },
         // Set by a SELECT for the NEXT load to auto-play (see wantPlayOnLoad above);
         // clearPlayOnLoad drops it on a self-load path, which bypasses this delegate.
         requestPlayOnLoad: () => { wantPlayOnLoad = true; },
