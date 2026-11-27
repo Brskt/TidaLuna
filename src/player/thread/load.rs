@@ -158,6 +158,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
             return false;
         }
+        self.own_events_of(load_gen);
         self.orphaned = false;
         // A load supersedes whatever was fading. Manual skip keeps today's cut. Everything that
         // follows sits under the gate on purpose: a Load this thread discards commits to nothing,
@@ -584,6 +585,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // The caller matched a mirror of this thread's state. Here the state is known: a track
         // this thread dropped (release, failure, idle release) while the retained slot still
         // names it is loaded again for that page, as of `read_gen`, which a later mint outranks.
+        self.own_events_of(read_gen);
         let held = self.has_track && self.current_track_id.as_deref() == Some(track_id.as_str());
         if !held
             && let Some(retained) = super::retained_track()
@@ -660,6 +662,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!("[LOAD #{load_gen}] stale LoadFailed, ignoring");
             return;
         }
+        // The failed load's own owner: a cast's that failed is the controller's to hear.
+        self.own_events_of(load_gen);
         // Error first (cause), then Duration(0) (effect): the SDK's load()
         // awaits `mediaduration` with no timeout, and 0 is its own
         // unknown-duration sentinel.

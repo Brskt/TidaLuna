@@ -81,9 +81,9 @@ pub(crate) fn route_mode_toggle(toggle: crate::connect::receiver::queue::ModeTog
         .is_some_and(|tx| tx.try_send(BridgeEvent::ModeToggle(toggle)).is_ok())
 }
 
-/// Forward a player event to the receiver, if active. Called from
-/// `ui::flush`'s per-event hook on the player event loop, with `owner` the origin of the load
-/// that is current (`player::current_load`).
+/// Forward a player event to the receiver, if active. Called from `ui::flush`'s per-event
+/// hook on the player event loop, with `owner` the origin of the music the player thread
+/// held when it emitted the event, not the origin of the latest load when it is handled.
 ///
 /// Only a load the receiver made is the receiver's to hear. `ENGINE_GEN` cannot tell: the
 /// receiver writes it and every event is stamped with it; a local track's end would match the

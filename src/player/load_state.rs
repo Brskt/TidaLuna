@@ -1,6 +1,6 @@
 use std::sync::atomic::{
-    AtomicU32, AtomicU64,
-    Ordering::{AcqRel, Acquire, Relaxed},
+    AtomicU8, AtomicU32, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 
 /// The current load's generation and the origin that minted it, in ONE word.
@@ -79,6 +79,49 @@ impl StopScope {
     }
 }
 
+/// Whose music a stop's own `stopped` closes, and the generation it minted: that mint's owner
+/// holds the player next, unless a newer mint took it. The page writes its store for a cast's
+/// events alone; a stop that ends a cast or starts one speaks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StopOwners {
+    pub(crate) stopped: LoadOrigin,
+    pub(crate) minted: u32,
+}
+
+impl StopOwners {
+    /// For a stop that minted `minted` in `claimed`'s name over a player `previous` held.
+    pub(crate) fn of(previous: LoadOrigin, claimed: LoadOrigin, minted: u32) -> Self {
+        let stopped = if previous == LoadOrigin::Connect || claimed == LoadOrigin::Connect {
+            LoadOrigin::Connect
+        } else {
+            LoadOrigin::Local
+        };
+        Self { stopped, minted }
+    }
+}
+
+/// The owner of the music the player thread holds, set there and read by whatever tags its
+/// events: read on another thread when the event is handled, it is already the next mint's.
+pub(crate) struct OriginCell(AtomicU8);
+
+impl OriginCell {
+    pub(crate) fn new(origin: LoadOrigin) -> Self {
+        Self(AtomicU8::new(origin as u8))
+    }
+
+    pub(crate) fn set(&self, origin: LoadOrigin) {
+        self.0.store(origin as u8, Release);
+    }
+
+    pub(crate) fn get(&self) -> LoadOrigin {
+        if self.0.load(Acquire) == LoadOrigin::Connect as u8 {
+            LoadOrigin::Connect
+        } else {
+            LoadOrigin::Local
+        }
+    }
+}
+
 /// What a load that carries an earlier one on did (see [`continue_load`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Continuation {
@@ -107,23 +150,34 @@ fn pack_load_state(cur_gen: u32, origin: LoadOrigin) -> u64 {
 }
 
 /// Mint the next generation if `claim` accepts the load that is current, in the origin it
-/// names. `None` when it declines, and the word is left as it was.
+/// names: the new generation and the owner it took the player from. `None` when it declines,
+/// and the word is left as it was.
 ///
 /// The decision, the generation and its origin land in one read-modify-write: `ui::flush` mints
 /// from a spawned task holding no lock while the Connect receiver mints inside the `AppState`
 /// lock, and a decision taken on a word read beforehand could act on a load already replaced.
-pub(super) fn mint_if(claim: impl Fn(u32, LoadOrigin) -> Option<LoadOrigin>) -> Option<u32> {
+pub(super) fn mint_if(
+    claim: impl Fn(u32, LoadOrigin) -> Option<LoadOrigin>,
+) -> Option<(u32, LoadOrigin)> {
     LOAD_STATE
         .try_update(AcqRel, Acquire, |word| {
             let (cur_gen, owner) = unpack_load_state(word);
             claim(cur_gen, owner).map(|origin| pack_load_state(cur_gen.wrapping_add(1), origin))
         })
         .ok()
-        .map(|previous| unpack_load_state(previous).0.wrapping_add(1))
+        .map(|previous| {
+            let (cur_gen, owner) = unpack_load_state(previous);
+            (cur_gen.wrapping_add(1), owner)
+        })
 }
 
 /// Mint the next load generation, naming who it belongs to.
 pub(crate) fn begin_load(origin: LoadOrigin) -> u32 {
+    begin_load_over(origin).0
+}
+
+/// [`begin_load`], with the owner the new load took the player from.
+pub(crate) fn begin_load_over(origin: LoadOrigin) -> (u32, LoadOrigin) {
     mint_if(|_, _| Some(origin)).expect("a claim that accepts every load always mints")
 }
 
@@ -134,7 +188,7 @@ pub(crate) fn begin_load(origin: LoadOrigin) -> u32 {
 /// advance). The check shares the mint's exchange, or a load would start over a stop or a session
 /// release landing in between.
 pub(crate) fn continue_load(expected_gen: u32) -> Option<u32> {
-    mint_if(|cur_gen, owner| (cur_gen == expected_gen).then_some(owner))
+    mint_if(|cur_gen, owner| (cur_gen == expected_gen).then_some(owner)).map(|(minted, _)| minted)
 }
 
 /// The current load's generation, for the readers that only ask "is this still my load?".

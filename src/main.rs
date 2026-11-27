@@ -429,9 +429,9 @@ fn main() {
         }
     }
 
-    let player = Arc::new(Player::new(
-        move |event: PlayerEvent| {
-            let mut task = PlayerEventTask::new(event);
+    let player = Arc::new(Player::tagged(
+        move |event: PlayerEvent, owner| {
+            let mut task = PlayerEventTask::new(event, owner);
             post_task(ThreadId::UI, Some(&mut task));
         },
         rt_handle.clone(),

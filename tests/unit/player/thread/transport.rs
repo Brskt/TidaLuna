@@ -4,11 +4,36 @@
 
 use super::{PlayAction, decide_play};
 use crate::player::thread::DecodeEvent;
-use crate::player::thread::harness::{harness, last_state};
+use crate::player::thread::harness::{harness, last_state, local_stop};
 use crate::player::{PlaybackState, PlayerCommand, PlayerEvent};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+
+/// Two requesters can send in the opposite order to their mints: a stop dequeued after a newer
+/// load must leave that load's owner on what follows, its own `stopped` alone speaking for the
+/// music it ended.
+#[tokio::test]
+async fn a_stop_overtaken_by_a_newer_load_leaves_that_loads_owner() {
+    use crate::player::LoadOrigin::{Connect, Local};
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let mut h = harness();
+    let stop_gen = crate::player::begin_load(Local);
+    crate::player::begin_load(Connect);
+    h.player.event_owner.set(Connect);
+
+    h.player.handle_command(PlayerCommand::Stop(
+        3,
+        crate::player::StopOwners::of(Local, Local, stop_gen),
+    ));
+
+    let after = h.player.event_owner.get();
+    crate::player::begin_load(Local);
+    assert_eq!(
+        after, Connect,
+        "the stale stop took the newer load's events"
+    );
+}
 
 /// A load in flight wins even when a retained source also exists.
 #[test]
@@ -561,7 +586,8 @@ fn decode_reaching_eof_while_paused_keeps_the_resume_position() {
 fn a_play_after_the_page_that_loaded_the_track_ended_resumes_nothing() {
     let mut h = harness();
 
-    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player
+        .handle_command(PlayerCommand::Stop(1, local_stop()));
     h.player.handle_command(PlayerCommand::Orphan);
     h.events.lock().unwrap().clear();
     h.player.handle_play();
@@ -575,7 +601,8 @@ fn a_play_after_the_page_that_loaded_the_track_ended_resumes_nothing() {
 fn a_play_after_a_stop_resumes_the_retained_track() {
     let mut h = harness();
 
-    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player
+        .handle_command(PlayerCommand::Stop(1, local_stop()));
     h.player.handle_play();
 
     assert!(h.player.is_playing);
@@ -588,7 +615,8 @@ fn a_play_after_a_stop_resumes_the_retained_track() {
 fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
     let mut h = harness();
 
-    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player
+        .handle_command(PlayerCommand::Stop(1, local_stop()));
     assert!(
         h.player.resume_on_reassert,
         "a stop of a playing track records the intent"
@@ -635,7 +663,8 @@ fn release_frees_the_track_and_emits_stopped() {
 fn a_reassert_lifts_the_orphaning_only_for_the_committed_track() {
     for (track_id, orphaned) in [("track-1", false), ("another", true)] {
         let mut h = harness();
-        h.player.handle_command(PlayerCommand::Stop(1));
+        h.player
+            .handle_command(PlayerCommand::Stop(1, local_stop()));
         h.player.handle_command(PlayerCommand::Orphan);
 
         h.player.handle_command(PlayerCommand::ReassertResume {

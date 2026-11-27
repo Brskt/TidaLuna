@@ -1,4 +1,4 @@
-use crate::player::{LoadRequest, Volume};
+use crate::player::{LoadRequest, StopOwners, Volume};
 use crate::state::TrackInfo;
 
 #[derive(Debug, serde::Serialize, Clone)]
@@ -259,10 +259,11 @@ pub(super) enum PlayerCommand {
         read_gen: u32,
     },
     Pause,
-    Stop(u32),
+    /// The event seq the stop minted, and whose music its `stopped` closes and who owns after.
+    Stop(u32, StopOwners),
     /// Free the track and its output device now, with no `MediaError` or `Completed`: either
-    /// makes TIDAL skip the track. Carries the event seq a stop mints.
-    Release(u32),
+    /// makes TIDAL skip the track. Carries the event seq a stop mints, and its owners as a stop.
+    Release(u32, StopOwners),
     /// The page that loaded the track just stopped is gone (`StopScope::orphans`): until a load
     /// names a track again, the retained one is nobody's to resume.
     Orphan,

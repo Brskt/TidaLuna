@@ -2,7 +2,7 @@
 //! comes from the `harness` fixture the sidecars of `thread/` share.
 
 use super::settle_load;
-use crate::player::thread::harness::{Spy, harness, load_req};
+use crate::player::thread::harness::{Spy, harness, load_req, local_stop};
 use crate::player::{LoadRequest, PlaybackState, PlayerCommand, PlayerEvent, ResumePolicy};
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -358,7 +358,8 @@ async fn a_load_lifts_the_orphaning_unless_a_newer_one_superseded_it() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     for (generations_behind, orphaned) in [(0u32, false), (1, true)] {
         let mut h = harness();
-        h.player.handle_command(PlayerCommand::Stop(1));
+        h.player
+            .handle_command(PlayerCommand::Stop(1, local_stop()));
         h.player.handle_command(PlayerCommand::Orphan);
 
         h.player.handle_load(

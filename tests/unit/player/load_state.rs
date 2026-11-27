@@ -201,6 +201,43 @@ async fn a_stop_mints_only_when_its_scope_covers_the_owner() {
     }
 }
 
+/// The owner travels with the event from the moment the player thread emits it. Read later on the
+/// UI thread it would be the session end's Local mint: the cast's own end would go out as this
+/// host's, and the page would write nothing.
+#[tokio::test]
+async fn a_cast_session_end_says_its_stopped_in_the_casts_name() {
+    let _serialised = serialised().await;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let player = Player::tagged(
+        move |event, owner| {
+            let _ = tx.send((event, owner));
+        },
+        tokio::runtime::Handle::current(),
+    );
+    begin_load(LoadOrigin::Connect);
+
+    player
+        .stop(StopScope::Cast)
+        .expect("the player thread takes the stop");
+
+    let owner = loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok((
+                crate::player::PlayerEvent::StateChange(crate::player::PlaybackState::Stopped, _),
+                owner,
+            )) => break owner,
+            Ok(_) => continue,
+            Err(e) => panic!("no `stopped` from the player thread: {e}"),
+        }
+    };
+    begin_load(LoadOrigin::Local);
+    assert_eq!(
+        owner,
+        LoadOrigin::Connect,
+        "the cast's end went out as this host's"
+    );
+}
+
 /// A stop leaves the track retained and resumable; only the end of a page leaves it with no page
 /// behind it, and the player thread is told so for that scope alone.
 #[test]

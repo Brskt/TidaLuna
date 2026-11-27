@@ -66,6 +66,12 @@ pub(super) fn harness() -> Harness {
     }
 }
 
+/// A stop of this host's own music, in this host's name.
+pub(super) fn local_stop() -> crate::player::StopOwners {
+    use crate::player::LoadOrigin::Local;
+    crate::player::StopOwners::of(Local, Local, crate::player::current_gen())
+}
+
 /// The transport state announced last, ignoring position and format events.
 pub(super) fn last_state(events: &Spy) -> Option<PlaybackState> {
     events.lock().unwrap().iter().rev().find_map(|ev| match ev {

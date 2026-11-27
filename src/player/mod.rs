@@ -42,8 +42,8 @@ use volume::LevelStore;
 use load::{CacheReadError, LoadRequest, read_cache_entry};
 pub(crate) use load::{ResumePolicy, SegmentUrls, cdn_cache_status, log_response_headers};
 pub(crate) use load_state::{
-    Continuation, LoadOrigin, StopScope, begin_load, continue_load, current_gen, current_load,
-    next_event_seq,
+    Continuation, LoadOrigin, OriginCell, StopOwners, StopScope, begin_load, begin_load_over,
+    continue_load, current_gen, current_load, next_event_seq,
 };
 use protocol::PlayerCommand;
 pub(crate) use protocol::{
@@ -94,15 +94,26 @@ pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
 pub(crate) use thread::output::is_default_selector;
 
 impl Player {
+    #[cfg(test)]
     pub fn new<F>(callback: F, rt_handle: tokio::runtime::Handle) -> Self
     where
         F: Fn(PlayerEvent) + Send + 'static,
     {
-        // `DB.get()` rather than `db()`, whose accessor panics when no actor was installed, which
-        // is every unit test that builds a player.
-        Self::with_settings(callback, rt_handle, crate::state::DB.get().cloned())
+        Self::tagged(move |event, _| callback(event), rt_handle)
     }
 
+    /// A player whose callback is also told whose music each event is about: the owner the
+    /// player thread held when it emitted the event, not the one current when it is handled.
+    pub(crate) fn tagged<F>(callback: F, rt_handle: tokio::runtime::Handle) -> Self
+    where
+        F: Fn(PlayerEvent, LoadOrigin) + Send + 'static,
+    {
+        // `DB.get()` rather than `db()`, whose accessor panics when no actor was installed, which
+        // is every unit test that builds a player.
+        Self::build(callback, rt_handle, crate::state::DB.get().cloned())
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_settings<F>(
         callback: F,
         rt_handle: tokio::runtime::Handle,
@@ -110,6 +121,17 @@ impl Player {
     ) -> Self
     where
         F: Fn(PlayerEvent) + Send + 'static,
+    {
+        Self::build(move |event, _| callback(event), rt_handle, settings)
+    }
+
+    fn build<F>(
+        callback: F,
+        rt_handle: tokio::runtime::Handle,
+        settings: Option<crate::db::DbActor>,
+    ) -> Self
+    where
+        F: Fn(PlayerEvent, LoadOrigin) + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
 
@@ -141,16 +163,20 @@ impl Player {
         let thread_governor = governor.clone();
         let normalization = normalization::Normalization::default();
         let thread_normalization = normalization.clone();
+        let event_owner = std::sync::Arc::new(OriginCell::new(LoadOrigin::Local));
+        let thread_owner = event_owner.clone();
+        let tag = move |event| callback(event, event_owner.get());
         std::thread::spawn(move || {
             if let Some(mut pt) = thread::PlayerThread::new(
                 cmd_rx,
-                callback,
+                tag,
                 volume_sync_enabled,
                 thread_level,
                 thread_committed,
                 thread_governor,
                 thread_normalization,
             ) {
+                pt.share_event_owner(thread_owner);
                 pt.run();
             }
         });
@@ -206,12 +232,16 @@ impl Player {
         // stale-gate and the `continue_load` mint): playback cannot start after the stop;
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
-        if mint_if(|_, owner| scope.claim(owner)).is_none() {
+        let Some((minted, previous)) = mint_if(|_, owner| scope.claim(owner)) else {
             crate::vprintln!("[PLAYER] {scope:?} stop: not this scope's music, left playing");
             return Ok(());
-        }
+        };
+        let claimed = scope.claim(previous).unwrap_or(previous);
         let event_seq = next_event_seq();
-        self.send_cmd(PlayerCommand::Stop(event_seq))?;
+        self.send_cmd(PlayerCommand::Stop(
+            event_seq,
+            StopOwners::of(previous, claimed, minted),
+        ))?;
         if scope.orphans() {
             self.send_cmd(PlayerCommand::Orphan)?;
         }
@@ -222,14 +252,17 @@ impl Player {
     /// Chromium: a bypass backend would hold the device for its idle window. Mints as a local
     /// stop does, which bars any pending auto-play load from taking the device back.
     pub fn release(&self) -> anyhow::Result<()> {
-        begin_load(LoadOrigin::Local);
+        let (minted, previous) = begin_load_over(LoadOrigin::Local);
         // The track is gone from this moment: a same-track load read before the thread
         // dequeues the Release must not take the idempotent branch.
         *self
             .committed_track
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        self.send_cmd(PlayerCommand::Release(next_event_seq()))
+        self.send_cmd(PlayerCommand::Release(
+            next_event_seq(),
+            StopOwners::of(previous, LoadOrigin::Local, minted),
+        ))
     }
 
     pub fn seek(&self, time: f64) -> anyhow::Result<()> {

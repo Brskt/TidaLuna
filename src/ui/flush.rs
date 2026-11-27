@@ -152,8 +152,10 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
     }
 }
 
-pub(crate) fn handle_player_event(event: PlayerEvent) {
-    crate::connect::bridge::forward(&event, crate::player::current_load().1);
+/// `owner`: whose music the event is about, as the player thread emitted it. Read here instead,
+/// it is whoever minted last, and a cast's own end would go out as this host's.
+pub(crate) fn handle_player_event(event: PlayerEvent, owner: crate::player::LoadOrigin) {
+    crate::connect::bridge::forward(&event, owner);
 
     let effects = with_state(|state| {
         let mut should_flush = true;
@@ -192,7 +194,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 state.pending_player_events.push(PlayerBridgeEvent::state(
                     PlaybackState::Completed.as_str(),
                     seq,
-                    crate::player::current_load().1,
+                    owner,
                 ));
             }
             PlayerEvent::StateChange(st, seq) => {
@@ -235,11 +237,9 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     ));
                 }
 
-                state.pending_player_events.push(PlayerBridgeEvent::state(
-                    st.as_str(),
-                    seq,
-                    crate::player::current_load().1,
-                ));
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::state(st.as_str(), seq, owner));
             }
             PlayerEvent::Duration(duration, seq, track_id) => {
                 // Taken by value to keep the decision below out of the lock, and to record the
@@ -332,7 +332,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         code.as_str(),
                         product_id.as_deref(),
                         cause.map(DeviceErrorKind::as_str),
-                        crate::player::current_load().1,
+                        owner,
                     ));
             }
             PlayerEvent::NetworkLost(_) => {
@@ -443,10 +443,11 @@ wrap_task! {
 wrap_task! {
     pub(crate) struct PlayerEventTask {
         event: PlayerEvent,
+        owner: crate::player::LoadOrigin,
     }
     impl Task {
         fn execute(&self) {
-            handle_player_event(self.event.clone());
+            handle_player_event(self.event.clone(), self.owner);
         }
     }
 }

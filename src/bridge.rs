@@ -50,8 +50,8 @@ impl PlayerBridgeEvent {
         }
     }
 
-    /// `owner` is whoever holds the player as the state is handed over, which is what the
-    /// renderer's queue has to know before acting on it.
+    /// `owner` is whoever held the player when the player thread emitted the state, which is
+    /// what the renderer's queue has to know before acting on it.
     pub fn state(value: &'static str, seq: u32, owner: crate::player::LoadOrigin) -> Self {
         Self {
             t: "state",

@@ -248,6 +248,9 @@ pub(super) struct PlayerThread<F> {
     // Did the open stream come from a default selector ("auto"/"default"/none)?
     // On Windows it follows the OS default; a named stream is pinned.
     output_is_default: bool,
+    // Whose music the events are about, read by the `Player`'s callback as each one is emitted:
+    // set by the load that committed it, a stop's owners, a re-assert of the page's track.
+    event_owner: Arc<crate::player::OriginCell>,
     // WASAPI exclusive
     #[cfg(target_os = "windows")]
     exclusive_handle: Option<ExclusiveHandle>,
@@ -460,6 +463,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_device_id: None,
             current_output_name: None,
             output_is_default: false,
+            event_owner: Arc::new(crate::player::OriginCell::new(
+                crate::player::LoadOrigin::Local,
+            )),
             #[cfg(target_os = "windows")]
             exclusive_handle: None,
             #[cfg(target_os = "windows")]
@@ -530,6 +536,34 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             normalization,
             current_gains: crate::player::normalization::TrackGains::UNITY,
         })
+    }
+
+    /// The owner cell the `Player`'s callback reads as each event is emitted.
+    pub(super) fn share_event_owner(&mut self, cell: Arc<crate::player::OriginCell>) {
+        self.event_owner = cell;
+    }
+
+    /// The music this thread holds now belongs to whoever minted `load_gen`, if it is still the
+    /// current generation: a later mint is a load or a stop that sets its own owner.
+    fn own_events_of(&self, load_gen: u32) -> bool {
+        let (current, origin) = crate::player::current_load();
+        let owns = current == load_gen;
+        if owns {
+            self.event_owner.set(origin);
+        }
+        owns
+    }
+
+    /// Run a stop whose own `stopped` speaks for the music it ends. What follows is its mint's
+    /// owner's, unless a newer load was handled first (two requesters can send in the opposite
+    /// order to their mints): that load's owner stays.
+    fn stop_as(&mut self, owners: crate::player::StopOwners, stop: impl FnOnce(&mut Self)) {
+        let before = self.event_owner.get();
+        self.event_owner.set(owners.stopped);
+        stop(self);
+        if !self.own_events_of(owners.minted) {
+            self.event_owner.set(before);
+        }
     }
 
     /// What a stream opened for the committed track scales its samples by.
@@ -707,8 +741,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 read_gen,
             } => self.handle_reassert_resume(want_play, product_id, track_id, read_gen),
             PlayerCommand::Pause => self.handle_pause(),
-            PlayerCommand::Stop(event_seq) => self.handle_stop(event_seq),
-            PlayerCommand::Release(event_seq) => self.handle_release(event_seq),
+            PlayerCommand::Stop(event_seq, owners) => {
+                self.stop_as(owners, |thread| thread.handle_stop(event_seq));
+            }
+            PlayerCommand::Release(event_seq, owners) => {
+                self.stop_as(owners, |thread| thread.handle_release(event_seq));
+            }
             PlayerCommand::Orphan => self.handle_orphan(),
             PlayerCommand::Seek(time) => self.handle_seek(time),
             PlayerCommand::SetVolume(vol) => self.handle_set_volume(vol),
