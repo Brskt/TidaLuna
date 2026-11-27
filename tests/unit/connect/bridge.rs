@@ -63,7 +63,13 @@ async fn a_dead_network_reaches_the_controller() {
     set_active(Some(tx));
     set_client_connected(true);
 
-    forward(&PlayerEvent::NetworkLost(1), LoadOrigin::Connect);
+    forward(
+        &PlayerEvent::NetworkLost {
+            seq: 1,
+            announced: true,
+        },
+        LoadOrigin::Connect,
+    );
 
     let lost = rx.try_recv().expect("a dead network reaches the receiver");
     assert!(
@@ -126,7 +132,10 @@ async fn ready_progress_duration_end_and_failures_reach_the_receiver_with_their_
             product_id: None,
             cause: None,
         },
-        PlayerEvent::NetworkLost(7),
+        PlayerEvent::NetworkLost {
+            seq: 7,
+            announced: true,
+        },
     ] {
         forward(&event, LoadOrigin::Connect);
         let forwarded = rx.try_recv().expect("the receiver's own load reaches it");
@@ -177,7 +186,10 @@ fn events_of_a_track() -> Vec<PlayerEvent> {
             product_id: None,
             cause: None,
         },
-        PlayerEvent::NetworkLost(1),
+        PlayerEvent::NetworkLost {
+            seq: 1,
+            announced: true,
+        },
         PlayerEvent::ReplayRequest {
             track: crate::state::TrackInfo {
                 url: "https://example.invalid/a.flac".to_string(),

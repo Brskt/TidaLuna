@@ -419,10 +419,15 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
     {
         let events = h.events.lock().unwrap();
         assert!(
-            events
-                .iter()
-                .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
-            "a stalled incoming track that got promoted must still report the loss, got {events:?}"
+            events.iter().any(|ev| matches!(
+                ev,
+                PlayerEvent::NetworkLost {
+                    announced: true,
+                    ..
+                }
+            )),
+            "a stalled incoming track that got promoted must still report the loss, as one after \
+             its load resolved, got {events:?}"
         );
     }
 
@@ -438,7 +443,7 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
     assert!(
         !events
             .iter()
-            .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
+            .any(|ev| matches!(ev, PlayerEvent::NetworkLost { .. })),
         "a skip is not a failure: promoting for one must report nothing, got {events:?}"
     );
 }

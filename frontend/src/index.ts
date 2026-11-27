@@ -246,11 +246,11 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
         const mapped = SEQ_EVENTS[type];
         const loadOwner: LoadOwner = type === "mediaerror" ? window.nativeInterface.playback.loadOwner(event.v?.productId) : "foreign";
         if (type === "medianetworklost") {
-            // Not a passthrough: a raw `mediaerror` loses TIDAL's one-second STALLED
-            // race, leaving the spinner turning over a player that will never resume.
-            // Rust has already waited thirty seconds for the bytes; this is the answer
-            // to their never arriving, and it must not advance the queue.
-            refusePlayback("TidaLunar cannot play music without an internet connection. Please try again when you're connected.");
+            // Once its load resolved, the SDK reports a loss itself (PENetwork on the `idle` Rust sends
+            // next). Before that its load() still awaits a length and TIDAL's watchdog an IDLE; a
+            // self-load or a cast's track is no session of its own: the refusal ends those.
+            if (event.v?.announced && !event.cast && !isSelfLoad()) bridge.trigger("mediamaxconnectionsreached");
+            else refusePlayback("TidaLunar cannot play music without an internet connection. Please try again when you're connected.");
         } else if (type === "mediacastowned") {
             // Rust refused a load: a TIDAL Connect controller owns the player. `load` names the
             // SDK load refused (none for a self-load, which the SDK does not wait on). The SDK

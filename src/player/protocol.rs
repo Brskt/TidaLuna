@@ -207,11 +207,13 @@ pub enum PlayerEvent {
         product_id: Option<String>,
         cause: Option<DeviceErrorKind>,
     },
-    /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
-    /// player and raises TIDAL's own error banner; never advances the queue, and never
-    /// touches the cache: the file was fine, the connection was not. Carries the load's event
-    /// generation, as `MediaError` does.
-    NetworkLost(u32),
+    /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the player and
+    /// never touches the cache: the file was fine, the connection was not. `announced`: the load's
+    /// length reached the page and the SDK's load() resolved, leaving the SDK to report the loss.
+    NetworkLost {
+        seq: u32,
+        announced: bool,
+    },
     /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
     /// at the generation snapshot (skipped if a newer load/stop superseded it),
     /// seeks to `position` (None = start), and auto-plays per `play`. Emitted on a

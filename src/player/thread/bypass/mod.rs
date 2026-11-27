@@ -143,12 +143,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::player::cache::AudioCache::drop_entry_detached(tid, seen);
         }
         match cause {
-            // No `MediaError`: every code the SDK maps advances the queue, and a track whose
-            // bytes stopped arriving has not earned that. The text is already logged by the
-            // caller; what crosses to the SDK is the bare fact, as on the shared path.
+            // No `MediaError`: TIDAL reads one as an unreadable file, and a track whose bytes
+            // stopped arriving is not. The text is already logged by the caller; what crosses
+            // to the page is the bare fact, as on the shared path.
             PacketFailure::Network => {
                 crate::verr!("[BYPASS] Network lost, stopping the player");
-                (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
+                (self.callback)(PlayerEvent::NetworkLost {
+                    seq: self.current_seq,
+                    announced: self.duration_announced,
+                });
+                // A probe that lost the network announced no length, and the SDK's load() awaits
+                // one with no timeout: 0, as `end_failed_track` settles every other early failure.
+                if !self.duration_announced {
+                    (self.callback)(PlayerEvent::Duration(
+                        0.0,
+                        self.current_seq,
+                        self.current_product_id.clone(),
+                    ));
+                }
             }
             // Before its length reached the page the track failed opening, as a load fails: it
             // is named for the page to refuse, and the SDK's load is settled.

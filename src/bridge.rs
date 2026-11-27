@@ -177,16 +177,16 @@ impl PlayerBridgeEvent {
         }
     }
 
-    /// Not a passthrough event: the renderer answers it with the same five-step refusal
-    /// the undecodable-profile branch uses, because a raw `mediaerror` alone loses the
-    /// one-second STALLED race TIDAL arms on every autoplay load.
-    pub fn network_lost() -> Self {
+    /// Not a passthrough event. With `announced` the load's length reached the page and the SDK's
+    /// load() resolved: the renderer hands it the loss (`mediamaxconnectionsreached`). A load still
+    /// pending, a self-load or a cast's track take the renderer's own refusal instead.
+    pub fn network_lost(owner: crate::player::LoadOrigin, announced: bool) -> Self {
         Self {
             t: "medianetworklost",
             seq: None,
-            cast: false,
+            cast: owner == crate::player::LoadOrigin::Connect,
             product: None,
-            v: serde_json::Value::Null,
+            v: serde_json::json!({ "announced": announced }),
         }
     }
 

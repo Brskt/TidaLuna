@@ -335,10 +335,20 @@ pub(crate) fn handle_player_event(event: PlayerEvent, owner: crate::player::Load
                         owner,
                     ));
             }
-            PlayerEvent::NetworkLost(_) => {
+            PlayerEvent::NetworkLost { seq, announced } => {
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::network_lost());
+                    .push(PlayerBridgeEvent::network_lost(owner, announced));
+                // The SDK raises its network error on the first `idle` AFTER the loss reached it
+                // (a cast's loss never does). Bridge-only: OS controls and Connect read
+                // `PlayerEvent`s, and the `Stopped` that follows settles them.
+                if announced && owner != crate::player::LoadOrigin::Connect {
+                    state.pending_player_events.push(PlayerBridgeEvent::state(
+                        PlaybackState::Idle.as_str(),
+                        seq,
+                        owner,
+                    ));
+                }
             }
             PlayerEvent::VolumeSync(v) => {
                 let level = state.player.note_volume(v);

@@ -12,9 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// Why the incoming decoder of a fade died. The two settle differently once the fade has
-/// already promoted the track they describe; they travel apart instead of flattened
-/// into a message: every `MediaError` code TIDAL maps advances the queue, and a track
-/// whose bytes stopped arriving has not earned that.
+/// already promoted the track they describe; they travel apart instead of flattened into a
+/// message: TIDAL reads any `MediaError` code as an unreadable file, which a stall is not.
 pub(super) enum IncomingFailure {
     NetworkStalled,
     Decode(String),
@@ -605,7 +604,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         match failure {
             IncomingFailure::NetworkStalled => {
-                (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
+                (self.callback)(PlayerEvent::NetworkLost {
+                    seq: self.current_seq,
+                    announced: self.duration_announced,
+                });
             }
             IncomingFailure::Decode(error) => (self.callback)(PlayerEvent::MediaError {
                 error,

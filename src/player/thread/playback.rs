@@ -286,10 +286,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         // No duration named: the deadline is whichever budget expires
                         // first, and that is the download's eight reconnects.
                         crate::verr!("[DECODE] Network lost, stopping the player");
-                        // Deliberately none of what the error arm below does. `drop_entry`
-                        // would evict a file that decoded fine until the bytes stopped,
-                        // and every `MediaError` code TIDAL maps advances the queue.
-                        (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
+                        // Deliberately none of what the error arm below does: `drop_entry` would
+                        // evict a file that decoded fine until the bytes stopped, and a `MediaError`
+                        // reads as an unreadable file where the SDK has a network signal of its own.
+                        (self.callback)(PlayerEvent::NetworkLost {
+                            seq: self.current_seq,
+                            announced: self.duration_announced,
+                        });
                         // The decode thread is gone; leaving these set arms a guard that
                         // nothing can clear, exactly as in the error arm.
                         self.set_committed_track(None);

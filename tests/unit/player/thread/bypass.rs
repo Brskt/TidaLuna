@@ -132,7 +132,7 @@ impl ReplayableTrack {
 
 /// A dead bypass decoder hands the device back, drops the seek sender and keeps the resume point
 /// whatever killed it. Only the report differs: an unreadable source is a `MediaError`, a stall
-/// is `NetworkLost` and never an error code, which the SDK answers by advancing the queue.
+/// is `NetworkLost` and never an error code, which TIDAL would read as an unreadable file.
 #[cfg(target_os = "windows")]
 #[test]
 fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
@@ -166,7 +166,7 @@ fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
                     .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
                 events
                     .iter()
-                    .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
+                    .any(|ev| matches!(ev, PlayerEvent::NetworkLost { .. })),
             )
         };
         assert_eq!(
@@ -175,7 +175,7 @@ fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
         );
         assert_eq!(
             media_error, !network_lost,
-            "{what}: any code the SDK maps advances the queue, which a stall has not earned"
+            "{what}: an error code reads as an unreadable file, which a stall is not"
         );
         assert!(
             h.player.exclusive_release_at.is_some(),
@@ -198,6 +198,34 @@ fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
             last_state(&h.events),
             Some(PlaybackState::Stopped),
             "{what}"
+        );
+    }
+}
+
+/// The SDK's load() awaits a length with no timeout. A probe that lost the network announced
+/// none: left as is, that load stays pending until some later track's length releases it.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_bypass_network_loss_before_the_length_settles_the_load() {
+    use crate::player::packet_failure::PacketFailure;
+    for announced in [false, true] {
+        let mut h = harness();
+        h.player.is_exclusive_mode = true;
+        h.player.duration_announced = announced;
+        h.player.current_seq = 4;
+
+        h.player.settle_bypass_decode_failure(
+            "probe failed: no data from the download for 30s".to_string(),
+            PacketFailure::Network,
+        );
+
+        let events = h.events.lock().unwrap();
+        let settled = events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::Duration(d, 4, _) if *d == 0.0));
+        assert_eq!(
+            settled, !announced,
+            "announced {announced}: a length of 0 only for a load still awaiting one: {events:?}"
         );
     }
 }
@@ -1118,7 +1146,7 @@ fn a_released_exclusive_stream_says_nothing_after_the_release() {
         !events.iter().any(|ev| matches!(
             ev,
             PlayerEvent::MediaError { .. }
-                | PlayerEvent::NetworkLost(_)
+                | PlayerEvent::NetworkLost { .. }
                 | PlayerEvent::StateChange(PlaybackState::Completed, _)
         )),
         "the released stream spoke after the release: {events:?}"

@@ -175,7 +175,7 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         // arm rather than a `StatusUpdated`, because the receiver answers this one by
         // settling to `Stopped` FIRST: a status alone leaves `PbState::Started` standing,
         // and the status recomputed from it re-asserts `Playing` to the phone.
-        PlayerEvent::NetworkLost(seq) => Some(BridgeEvent::PlaybackError {
+        PlayerEvent::NetworkLost { seq, .. } => Some(BridgeEvent::PlaybackError {
             status_code: "network connection lost".to_string(),
             from: from(*seq),
         }),
