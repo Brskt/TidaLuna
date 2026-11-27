@@ -41,6 +41,10 @@ pub struct PreloadState {
     /// because `start_download` runs it in a task the staging one does not own.
     task: Option<tokio::task::JoinHandle<()>>,
     download_cancel: Option<CancellationToken>,
+    /// Canonical id of the track the current attempt stages. Outlives the name on purpose: a
+    /// load's clear and `take_next` spend the name, and the load's miss must still know whose
+    /// staging it leaves without a reader.
+    staging_id: Option<String>,
     /// Which staging attempt owns `task`, `download_cancel` and `data`.
     ///
     /// `start_preload` cannot hold this lock across its awaits, so the decision to stage and the
@@ -57,6 +61,7 @@ impl PreloadState {
             data: None,
             task: None,
             download_cancel: None,
+            staging_id: None,
             attempt: 0,
         }
     }
@@ -95,6 +100,7 @@ impl PreloadState {
             track: track.clone(),
             load_gen,
         });
+        self.staging_id = Some(id);
         Some(self.attempt)
     }
 
@@ -191,6 +197,17 @@ impl PreloadState {
         }
         self.data = None;
         self.next = None;
+        self.staging_id = None;
+    }
+
+    /// A load of `track_id` settled on a source other than this staging: retire it when it
+    /// stages that track and no current name keeps a reader for it. Repeat-one's restage
+    /// answers the current load and stays for the completion path.
+    fn release_unserved(&mut self, track_id: &str) {
+        if self.staging_id.as_deref() == Some(track_id) && !self.next_is_current() {
+            crate::vprintln!("[PRELOAD] Released a staging its own load did not use");
+            self.reset();
+        }
     }
 
     /// True while the staged "next" still answers the load that is current.
@@ -297,6 +314,7 @@ impl PreloadState {
             if let Some(staged) = self.data.take() {
                 staged.buffer.adopt_as_playback();
             }
+            self.staging_id = None;
             // The download feeding those bytes is no longer ours to stop. A staged buffer is
             // published while it is still filling; the track being committed here is playing
             // from a download that must run to the end of the file: cancelling it on the next
@@ -375,6 +393,7 @@ impl PreloadState {
             return None;
         }
         self.next = None;
+        self.staging_id = None;
         // Handed over with the buffer, for the same reason as in `commit`: the caller is about
         // to play these bytes and the rest of them are still arriving. Clearing this copy
         // strands nothing: the buffer carries the same token.
@@ -743,6 +762,13 @@ pub fn discard_staged_if_match(failed: &TrackInfo) {
 /// staged none, and a staged copy still belongs to whoever loads it.
 pub async fn clear_next_track_if_match(track_id: &str) {
     preload_state().clear_next_for_load(track_id);
+}
+
+/// A load of `track_id` settled on the disk cache or its own download. A staging of that track
+/// whose name the load already spent has no reader left: stopped here, it neither downloads
+/// the track a second time nor holds it in RAM until the next preload.
+pub async fn release_unserved_staging(track_id: &str) {
+    preload_state().release_unserved(track_id);
 }
 
 pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack> {

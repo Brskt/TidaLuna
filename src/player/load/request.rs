@@ -110,11 +110,15 @@ impl Player {
             crate::audio::preload::clear_next_track_if_match(&track_id).await;
 
             if let LoadStep::Handled = try_cache_hit(&ctx, &track_id, &key).await {
+                crate::audio::preload::release_unserved_staging(&track_id).await;
                 return;
             }
             if let LoadStep::Handled = try_preload_hit(&ctx, &track, &track_id).await {
                 return;
             }
+            // After the take, never before: a staging whose bytes the take could still adopt
+            // belongs to this load until it has asked.
+            crate::audio::preload::release_unserved_staging(&track_id).await;
             start_stream_load(&ctx, &url, &key, &track_id).await;
         });
 

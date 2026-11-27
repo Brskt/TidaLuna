@@ -859,6 +859,48 @@ async fn a_load_of_the_track_being_staged_does_not_cost_it_its_bytes() {
     preload_state().reset();
 }
 
+/// A manual skip: the SDK preloads the target, then loads it before the staging's response lands.
+/// The load misses and fetches the track itself. Nothing can read the staging once its name is
+/// cleared: it must not start its download.
+#[tokio::test]
+async fn a_staging_its_own_load_missed_never_starts_its_download() {
+    let _serialised = PRELOAD_TESTS.lock().await;
+    let track = staged("https://cdn.invalid/media/track-a.flac?token=STAGED");
+    let attempt = preload_state()
+        .claim(&track, crate::player::current_gen())
+        .expect("the claim is granted with nothing staged");
+    crate::player::begin_load(crate::player::LoadOrigin::Local);
+    clear_next_track_if_match("https://cdn.invalid/media/track-a.flac").await;
+
+    release_unserved_staging("https://cdn.invalid/media/track-a.flac").await;
+
+    assert!(
+        !preload_state().arm_download(attempt, CancellationToken::new()),
+        "the staging downloaded the whole track beside the load's own copy"
+    );
+    preload_state().reset();
+}
+
+/// The release spares a repeat-one restage of the track now loading, which the completion path
+/// replays.
+#[tokio::test]
+async fn a_release_spares_a_repeat_one_restage() {
+    let _serialised = PRELOAD_TESTS.lock().await;
+    crate::player::begin_load(crate::player::LoadOrigin::Local);
+    let repeat = staged("https://cdn.invalid/media/track-a.flac?token=RESTAGED");
+    let attempt = preload_state()
+        .claim(&repeat, crate::player::current_gen())
+        .expect("the claim is granted with nothing staged");
+
+    release_unserved_staging("https://cdn.invalid/media/track-a.flac").await;
+
+    assert!(
+        preload_state().arm_download(attempt, CancellationToken::new()),
+        "repeat-one lost the restage the completion path replays"
+    );
+    preload_state().reset();
+}
+
 /// Only the attempt that currently owns the slot may write into it.
 ///
 /// `start_preload` cannot hold the lock across its awaits. The handles it produces arrive
