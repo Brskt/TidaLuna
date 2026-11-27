@@ -335,11 +335,8 @@ wrap_window_delegate! {
             // waits on the database; the exit is bounded first.
             crate::platform::quit::begin_winding();
 
-            // Quit path: stop audio now instead of waiting for process teardown.
-            with_state(|state| {
-                let _ = state.player.stop(crate::player::StopScope::Playing);
-            });
-
+            // The music stops in `quit_loop`, once the page is gone: a stop heard here would make
+            // TIDAL's unload save the session as paused, and no relaunch would resume it.
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
             if let Some(ws) = pending_ws {
                 crate::state::db().call_settings(move |sc| store_window_state(sc, &ws));

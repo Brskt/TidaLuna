@@ -770,6 +770,15 @@ impl AppState {
             &mut self.pending_time_update,
         );
     }
+
+    /// End all the music this host plays, once the page is gone.
+    fn end_music_for_quit(&mut self) {
+        end_music_for_quit(
+            &self.player,
+            &mut self.pending_player_events,
+            &mut self.pending_time_update,
+        );
+    }
 }
 
 /// What the end of a page owes the music it was playing, stated without an `AppState` behind it.
@@ -786,6 +795,16 @@ fn end_page_music(
     let _ = player.stop(crate::player::StopScope::OwnMusic);
     pending_events.clear();
     *pending_time = None;
+}
+
+/// A quit ends all the music this host plays, the page's and a cast's.
+fn end_music_for_quit(
+    player: &crate::player::Player,
+    pending_events: &mut Vec<crate::bridge::PlayerBridgeEvent>,
+    pending_time: &mut Option<(f64, u32)>,
+) {
+    end_page_music(player, pending_events, pending_time);
+    let _ = player.stop(crate::player::StopScope::Cast);
 }
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
@@ -815,7 +834,7 @@ pub(crate) fn context_ready() -> bool {
 pub(crate) fn quit_loop() {
     crate::platform::quit::begin_winding();
     with_state(|s| {
-        s.end_page_music();
+        s.end_music_for_quit();
         s.end_page_plugins();
     });
     crate::platform::app_lock::close_channel();
