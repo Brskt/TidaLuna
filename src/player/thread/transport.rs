@@ -38,6 +38,23 @@ pub(super) fn decide_play(
     }
 }
 
+/// What a load that failed before `handle_load` does to the track the thread still holds.
+#[derive(Debug, PartialEq)]
+pub(super) enum FailedLoad {
+    /// Paused: the next Play would resume it under the product that replaced it. End it.
+    Retire,
+    /// Playing (a cast's, a fade's) or nothing held: no Play resumes it.
+    Leave,
+}
+
+/// A load replaces the track it follows whatever its outcome, as the SDK's native `load` does.
+pub(super) fn decide_failed_load(has_track: bool, is_playing: bool) -> FailedLoad {
+    match (has_track, is_playing) {
+        (true, false) => FailedLoad::Retire,
+        (true, true) | (false, _) => FailedLoad::Leave,
+    }
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn stop_decode(&mut self) {
         if let Some(tx) = self.decode_cmd_tx.take() {

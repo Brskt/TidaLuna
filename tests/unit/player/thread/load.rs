@@ -136,9 +136,8 @@ async fn a_probe_failure_names_its_load_and_ends_the_track() {
     assert_eq!(h.player.idle_state, PlaybackState::Stopped);
 }
 
-/// A fetch that failed never reached `handle_load`: the thread still holds the previous track,
-/// and the id has to come from the command. A load a newer one superseded reports nothing (the
-/// renderer is never told that a track it has since replaced failed).
+/// A fetch that failed never reached `handle_load`: the thread's own id still names the previous
+/// track, and the id has to come from the command. A load a newer one superseded reports nothing.
 #[tokio::test]
 async fn a_fetch_failure_names_the_track_its_load_carried_unless_superseded() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
@@ -406,5 +405,47 @@ fn the_start_position_is_the_queued_seek_else_the_auto_resume_and_taking_retires
             "left armed, the next play seeks back to the auto-resume: queued {queued:?}"
         );
         assert!(h.player.user_seek_override.is_none(), "queued {queued:?}");
+    }
+}
+
+/// The SDK's load(B) whose fetch dies before `handle_load`: its `reset()` stops A, the failure is
+/// reported, and A is gone at B's seq; no Play resumes it under B's product. A failure a newer
+/// load superseded owns nothing: the state is that load's to settle.
+#[tokio::test]
+async fn a_failed_load_retires_the_held_track_unless_a_newer_one_superseded_it() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    for superseded in [false, true] {
+        let mut h = harness();
+        let generation = crate::player::current_gen();
+        h.player
+            .handle_command(PlayerCommand::Stop(1, local_stop()));
+        h.player
+            .handle_command(PlayerCommand::LoadStarted { generation });
+        h.player.handle_command(PlayerCommand::LoadFailed {
+            error: "HTTP 403 Forbidden".to_string(),
+            code: crate::player::MediaErrorCode::NoSuchFile,
+            seq: 9,
+            load_gen: generation.wrapping_sub(u32::from(superseded)),
+            product_id: Some("120002099".to_string()),
+        });
+        h.player
+            .handle_command(PlayerCommand::LoadSettled { generation });
+
+        if superseded {
+            assert!(h.player.has_track, "a stale failure retired the held track");
+            continue;
+        }
+        let events = h.events.lock().unwrap();
+        assert!(
+            matches!(
+                events.last(),
+                Some(PlayerEvent::StateChange(PlaybackState::Stopped, 9))
+            ),
+            "the paused track outlived the load that replaced it: {:?}",
+            events.last()
+        );
+        drop(events);
+        h.player.handle_play();
+        assert!(!h.player.is_playing, "the replaced track was resumed");
     }
 }

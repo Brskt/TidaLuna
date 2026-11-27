@@ -678,6 +678,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             cause: None,
         });
         (self.callback)(PlayerEvent::Duration(0.0, seq, product_id));
+        // The SDK's reset() left the replaced track paused; a Play would now resume it under
+        // the failed product. Ended at this load's seq, the next Play re-arms the failed track.
+        if super::transport::decide_failed_load(self.has_track, self.is_playing)
+            == super::transport::FailedLoad::Retire
+        {
+            self.handle_release(seq);
+        }
     }
 }
 
