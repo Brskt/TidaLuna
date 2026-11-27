@@ -364,6 +364,10 @@ pub(super) struct PlayerThread<F> {
     coalesced_cmds: Vec<PlayerCommand>,
     /// The player's governor. This thread only ever writes its progress.
     governor: crate::audio::bandwidth::GovernorHandle,
+    /// The live "Normalize volume" mode, shared with every output path it hands it to.
+    normalization: crate::player::normalization::Normalization,
+    /// The committed track's loudness factors, which every output stream it opens plays at.
+    current_gains: crate::player::normalization::TrackGains,
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
@@ -374,6 +378,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         restored_level: Option<crate::player::Volume>,
         committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
         governor: crate::audio::bandwidth::GovernorHandle,
+        normalization: crate::player::normalization::Normalization,
     ) -> Option<Self> {
         // The level an earlier launch left, full scale on a first launch.
         let gain = restored_level.map_or(1.0, crate::player::Volume::as_gain);
@@ -522,7 +527,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
             governor,
+            normalization,
+            current_gains: crate::player::normalization::TrackGains::UNITY,
         })
+    }
+
+    /// What a stream opened for the committed track scales its samples by.
+    fn output_gain(&self) -> output::OutputGain {
+        output::OutputGain {
+            volume: self.volume.clone(),
+            normalization: self.normalization.clone(),
+            gains: self.current_gains,
+        }
     }
 
     /// Update the committed-track reconcile signal shared with the IPC thread:

@@ -343,7 +343,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(old) = self.asio_handle.take() {
             return self.park_behind_asio_teardown(old, id, mode);
         }
-        let Some(handle) = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone())) else {
+        let Some(handle) = AsioHandle::spawn(
+            self.exclusive_gain.clone(),
+            self.normalization.clone(),
+            Some(id.clone()),
+        ) else {
             // The user asked for this device by name: the refusal is theirs to see.
             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
             // The decoder and the cpal stream are already gone here: returning bare would
@@ -444,7 +448,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(old) = self.exclusive_handle.take() {
             old.shutdown();
         }
-        let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
+        let handle = ExclusiveHandle::spawn(
+            id.clone(),
+            self.exclusive_gain.clone(),
+            self.normalization.clone(),
+        );
         self.is_exclusive_mode = true;
         // Drop any stale release timer from a prior exclusive session; a fresh
         // engagement can't fire it and release the device we just acquired.
@@ -622,7 +630,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let device = self.resolve_output_device()?;
 
-        let opened = match open_output_stream(&device, sr, ch, &self.volume) {
+        let opened = match open_output_stream(&device, sr, ch, &self.output_gain()) {
             Some(o) => o,
             None => {
                 let kind = DeviceErrorKind::FormatNotSupported;

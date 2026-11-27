@@ -37,6 +37,7 @@ fn arm_for_promotion(h: &mut Harness, incoming_secs: f64) -> mpsc::Receiver<Deco
                 key: String::new(),
                 format: "flac".to_string(),
                 product_id: Some("incoming-product".to_string()),
+                gains: crate::player::normalization::TrackGains::UNITY,
             },
             load_gen: crate::player::current_gen(),
         },
@@ -204,6 +205,7 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("incoming-product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     };
     crate::audio::preload::PRELOAD_STATE
         .lock()
@@ -316,6 +318,7 @@ async fn a_stale_load_leaves_a_live_fade_armed() {
             load_start: std::time::Instant::now(),
             cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
+            gains: crate::player::normalization::TrackGains::UNITY,
         },
         false,
     );
@@ -338,6 +341,7 @@ fn a_busy_cache_never_parks_the_arming_tick() {
         key: String::new(),
         format: "flac".to_string(),
         product_id: None,
+        gains: crate::player::normalization::TrackGains::UNITY,
     };
 
     // What a wipe looks like from here: the mutex held by someone else for a while.
@@ -589,6 +593,7 @@ fn a_track_at(url: &str) -> crate::state::TrackInfo {
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("c-product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 
@@ -641,6 +646,7 @@ fn handle_load_of_c(h: &mut Harness, gen_c: u32, seq_c: u32) -> bool {
             load_start: std::time::Instant::now(),
             cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
+            gains: crate::player::normalization::TrackGains::UNITY,
         },
         false,
     )

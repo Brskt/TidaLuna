@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use super::normalization::{NormalizationMode, TrackGains};
 use super::{OutputMode, SegmentUrls};
 
 #[derive(Debug, PartialEq)]
@@ -19,6 +20,7 @@ pub(crate) enum PlayerIpc {
         /// The listener's act this load answers, `None` for an automatic load (a queue advance, a
         /// restore, the autoplay mix at a queue's end).
         act: Option<ListenerAct>,
+        gains: TrackGains,
     },
     Recover {
         url: String,
@@ -31,6 +33,7 @@ pub(crate) enum PlayerIpc {
         segment_urls: SegmentUrls,
         format: String,
         product_id: Option<String>,
+        gains: TrackGains,
     },
     Preload {
         url: String,
@@ -39,8 +42,13 @@ pub(crate) enum PlayerIpc {
         /// The track this preload is for, read off the play queue by the renderer. The
         /// gapless advance is driven in Rust, so this is the only chance to name it.
         product_id: Option<String>,
+        gains: TrackGains,
     },
     PreloadCancel,
+    /// TIDAL's "Normalize volume" setting, applied live.
+    Normalization {
+        mode: NormalizationMode,
+    },
     Metadata {
         payload: Value,
     },
@@ -169,6 +177,7 @@ impl PlayerIpc {
             | PlayerIpc::Volume { .. }
             | PlayerIpc::Preload { .. }
             | PlayerIpc::PreloadCancel
+            | PlayerIpc::Normalization { .. }
             | PlayerIpc::DevicesGet { .. }
             | PlayerIpc::DevicesSet { .. } => CastGate::Pass,
         }
@@ -297,6 +306,8 @@ pub(crate) fn parse_player_ipc(
                 // sender whose loads an answer has to name.
                 load_id: args.get(6).and_then(|v| v.as_u64()),
                 act: args.get(7).and_then(ListenerAct::from_wire),
+                // 9th and 10th args (optional): the album and track loudness factors.
+                gains: TrackGains::from_wire(args.get(8), args.get(9)),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.load")),
         },
@@ -314,6 +325,7 @@ pub(crate) fn parse_player_ipc(
                     segment_urls,
                     format: format.to_string(),
                     product_id: optional_id(args.get(3)),
+                    gains: TrackGains::from_wire(args.get(4), args.get(5)),
                 }),
                 _ => Err(PlayerIpcParseError::InvalidArgs("player.load_dash")),
             }
@@ -338,10 +350,14 @@ pub(crate) fn parse_player_ipc(
                 // 4th arg (optional): older renderers send three. An absent id lands the
                 // track untagged, which is what this channel did for every preload before.
                 product_id: optional_id(args.get(3)),
+                gains: TrackGains::from_wire(args.get(4), args.get(5)),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.preload")),
         },
         "player.preload.cancel" => Ok(PlayerIpc::PreloadCancel),
+        "player.normalization" => Ok(PlayerIpc::Normalization {
+            mode: NormalizationMode::from_wire(args.first()),
+        }),
         "player.metadata" => args
             .first()
             .cloned()

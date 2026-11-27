@@ -4,7 +4,7 @@ mod stream;
 
 #[cfg(test)]
 pub(super) use mixer::pack_xfade_done;
-pub(super) use mixer::{CrossfadeLink, CrossfadeSlot, unpack_xfade_done};
+pub(super) use mixer::{CrossfadeLink, CrossfadeSlot, OutputGain, unpack_xfade_done};
 pub(super) use resample::AudioPipeline;
 #[cfg(target_os = "windows")]
 pub(in crate::player) use stream::find_output_device;

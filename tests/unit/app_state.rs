@@ -28,7 +28,7 @@ fn a_blank_id_names_no_track() {
 
 #[test]
 fn a_measurement_naming_no_track_does_not_evict_one_that_does() {
-    // A recover through `retained_product_id` can still measure with no id to give; the
+    // A recover through `retained_identity` can still measure with no id to give; the
     // gapless advance no longer does. Storing an untagged one would cost A the length a frame
     // had yet to claim, and buy nothing: an untagged measurement matches no frame. The Connect
     // metadata task once wiped a decoded length this way each time repeat-one re-announced the

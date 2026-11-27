@@ -310,6 +310,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         *xfade.attach.lock().unwrap_or_else(|e| e.into_inner()) = Some(CrossfadeSlot {
             consumer,
             len_samples,
+            gains: track.gains,
         });
         crate::vprintln!(
             "[XFADE] armed, {:.2}s overlap (setting {}s)",
@@ -411,6 +412,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let track_id = crate::player::canonical_track_id(&state.next.track.url);
         self.current_track_id = Some(track_id.clone());
         self.current_product_id = state.next.track.product_id.clone();
+        // The callback already plays the promoted ring at these; a stream reopened later must too.
+        self.current_gains = state.next.track.gains;
         self.current_format = state.next.track.format.clone();
         // Without this, `Player::load`'s idempotent reconcile still names the
         // outgoing track. The frontend re-issuing load() for the track we just

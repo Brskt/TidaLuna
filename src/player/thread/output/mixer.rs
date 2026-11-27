@@ -4,12 +4,36 @@ use std::sync::atomic::{
 };
 use std::sync::{Arc, Mutex};
 
+use crate::player::normalization::{Normalization, TrackGains};
+
 /// The incoming track's ring plus the fade length, handed to the callback when a
 /// crossfade arms. `None` outside a crossfade, which is the state that keeps the
 /// output path arithmetically identical to a build without this feature.
 pub(in crate::player::thread) struct CrossfadeSlot {
     pub consumer: rtrb::Consumer<f32>,
     pub len_samples: usize,
+    /// The incoming track's own loudness factors, which it keeps once promoted.
+    pub gains: TrackGains,
+}
+
+/// What the callback scales every sample by: the listener's level, times the playing track's
+/// loudness factor under the live mode. The factor stays out of `volume`, which the OS mixer and
+/// Connect mirror as the listener's level.
+#[derive(Clone)]
+pub(in crate::player::thread) struct OutputGain {
+    pub volume: Arc<AtomicU32>,
+    pub normalization: Normalization,
+    pub gains: TrackGains,
+}
+
+/// Scales a voice in place by its loudness factor. Unity is skipped, which keeps a track the
+/// normalization leaves alone bit-identical to a build without it.
+fn apply_factor(samples: &mut [f32], factor: f32) {
+    if factor != 1.0 {
+        for s in samples.iter_mut() {
+            *s *= factor;
+        }
+    }
 }
 
 /// The three handles the control thread and the audio callback share to run a
@@ -111,7 +135,7 @@ fn drain_into(c: &mut rtrb::Consumer<f32>, dst: &mut [f32]) -> usize {
 
 pub(super) fn build_cpal_callback(
     mut consumer: rtrb::Consumer<f32>,
-    volume: Arc<AtomicU32>,
+    gain: OutputGain,
     seek_gen: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
     mute_ack: Arc<AtomicBool>,
@@ -133,6 +157,11 @@ pub(super) fn build_cpal_callback(
     // the reason the size does not track `data.len()`.
     let mut scratch_out: Box<[f32]> = vec![0.0; MIX_QUANTUM].into_boxed_slice();
     let mut scratch_in: Box<[f32]> = vec![0.0; MIX_QUANTUM].into_boxed_slice();
+    let OutputGain {
+        volume,
+        normalization,
+        gains: mut track_gains,
+    } = gain;
     // `consumer` is borrowed per use, never once at the top: a completed fade
     // reassigns it, and a borrow spanning the body would not compile.
     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -200,9 +229,14 @@ pub(super) fn build_cpal_callback(
         }
 
         let v = f32::from_bits(volume.load(Relaxed));
+        // Read every tick: a toggle of the setting reaches the playing track at the next buffer.
+        let mode = normalization.mode();
+        let out_factor = track_gains.factor(mode);
 
         // Copied out to keep no borrow of `slot` alive across the swap below.
         let Some(mut len_samples) = slot.as_ref().map(|s| s.len_samples) else {
+            // One multiplier (a unity factor leaves `v` exactly as it was).
+            let k = v * out_factor;
             let to_read = consumer.slots().min(data.len());
             if to_read > 0
                 && let Ok(chunk) = consumer.read_chunk(to_read)
@@ -210,10 +244,10 @@ pub(super) fn build_cpal_callback(
                 let (s1, s2) = chunk.as_slices();
                 let split = s1.len();
                 for (dst, src) in data[..split].iter_mut().zip(s1.iter()) {
-                    *dst = *src * v;
+                    *dst = *src * k;
                 }
                 for (dst, src) in data[split..to_read].iter_mut().zip(s2.iter()) {
-                    *dst = *src * v;
+                    *dst = *src * k;
                 }
                 chunk.commit_all();
                 played_samples.fetch_add(to_read as u64, Relaxed);
@@ -223,6 +257,8 @@ pub(super) fn build_cpal_callback(
             }
             return;
         };
+
+        let in_factor = slot.as_ref().map_or(1.0, |s| s.gains.factor(mode));
 
         // One pass per `MIX_QUANTUM` of the buffer: the scratch never has to match it.
         // `mix_frames` derives every sample's gain from the absolute `fade_pos + i` and
@@ -236,6 +272,9 @@ pub(super) fn build_cpal_callback(
                 None => 0,
             };
             xfade_in_played += in_n as u64;
+            // Each voice at its own track's factor, before the envelopes sum them.
+            apply_factor(&mut scratch_out[..out_n], out_factor);
+            apply_factor(&mut scratch_in[..in_n], in_factor);
 
             // A fade that outruns its incoming track finishes on the samples that remain
             // rather than mixing silence. `fade_pos` advances by the pass length whether or
@@ -289,6 +328,7 @@ pub(super) fn build_cpal_callback(
             // `consumer` by move. Only the track identity is left for the player.
             if let Some(done) = slot.take() {
                 consumer = done.consumer;
+                track_gains = done.gains;
             }
             // Rebase the clock in the tick that swaps, the only place that knows where the
             // swap fell: the control thread reads `done` up to a poll later, when the counter

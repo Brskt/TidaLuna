@@ -27,6 +27,8 @@ pub(super) struct StreamStart {
     /// The decoder's retirement flag, set by the player when it abandons the stream. The render
     /// reads it at dequeue and refuses a retired decoder's StartStream.
     pub(super) cancel: Arc<AtomicBool>,
+    /// The stream's track's loudness factors, bound to it at adoption.
+    pub(super) gains: crate::player::normalization::TrackGains,
 }
 
 pub(super) enum ExclusiveCommand {
@@ -176,12 +178,16 @@ pub(super) struct ExclusiveHandle {
 impl ExclusiveHandle {
     /// Spawn the WASAPI render thread for the given device.
     /// `device_id` - wasapi device id string, or "default".
-    pub fn spawn(device_id: String, gain: Arc<AtomicU32>) -> Self {
+    pub fn spawn(
+        device_id: String,
+        gain: Arc<AtomicU32>,
+        normalization: crate::player::normalization::Normalization,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
         let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();
 
         let handle = thread::spawn(move || {
-            render_thread(device_id, cmd_rx, event_tx, gain);
+            render_thread(device_id, cmd_rx, event_tx, gain, normalization);
         });
 
         Self {

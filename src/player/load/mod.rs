@@ -60,6 +60,7 @@ pub(super) struct LoadRequest {
     pub(super) load_start: std::time::Instant,
     pub(super) cached: Option<cache::Generation>,
     pub(super) format: String,
+    pub(super) gains: crate::player::normalization::TrackGains,
 }
 
 enum LoadStep {
@@ -76,6 +77,7 @@ struct LoadContext {
     cmd_tx: mpsc::Sender<PlayerCommand>,
     format: String,
     product_id: Option<String>,
+    gains: crate::player::normalization::TrackGains,
     /// Cancelled when a newer load supersedes this one or on stop.
     cancel_token: CancellationToken,
     /// The player's governor, for the download this load opens.
@@ -99,6 +101,7 @@ impl LoadContext {
                 load_start: self.load_start,
                 cached,
                 format: self.format.clone(),
+                gains: self.gains,
             },
             auto_play: self.auto_play,
         });

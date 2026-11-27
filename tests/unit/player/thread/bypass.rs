@@ -120,6 +120,7 @@ impl ReplayableTrack {
                     format: "flac".to_string(),
                     // Replayability turns on the credential and the format, never the id.
                     product_id: None,
+                    gains: crate::player::normalization::TrackGains::UNITY,
                 },
                 // Stamped as a freshly published source would be: a replay this fixture
                 // authorises is one the flush-side guard would also let through.

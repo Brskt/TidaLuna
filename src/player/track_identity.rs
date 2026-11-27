@@ -33,17 +33,22 @@ pub(crate) fn refresh_retained_credential(
     }
 }
 
-/// The id retained for a source, when the retained source is this one. A recover is handed a
-/// fresh credential for the track already playing and no identity at all; the retained copy is
-/// where that identity was last known.
-pub(super) fn retained_product_id(canonical_url_id: &str) -> Option<String> {
+/// The id and loudness factors retained for a source, when the retained source is this one. A
+/// recover is handed a fresh credential for the track already playing and no identity at all;
+/// the retained copy is where that identity was last known.
+pub(super) fn retained_identity(
+    canonical_url_id: &str,
+) -> (Option<String>, crate::player::normalization::TrackGains) {
     CURRENT_TRACK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retained()
         .map(|retained| &retained.track)
         .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
-        .and_then(|track| track.product_id.clone())
+        .map_or(
+            (None, crate::player::normalization::TrackGains::UNITY),
+            |track| (track.product_id.clone(), track.gains),
+        )
 }
 
 /// The url a running download must fetch with, for the track it started for. The signed url is a
@@ -75,7 +80,7 @@ pub(super) fn is_same_active_track(
 /// Whether the announced metadata describes a track other than this load's. The slot answers
 /// "what was announced last", never "which track is this load", and a Rust-driven advance runs
 /// ahead of the announcement. Only a POSITIVE disagreement counts: a load carrying no id of its
-/// own (what a recover through `retained_product_id` looks like) is no evidence of staleness,
+/// own (what a recover through `retained_identity` looks like) is no evidence of staleness,
 /// and treating it as such would withhold a title that was correct.
 pub(crate) fn announcement_is_stale(load: Option<&str>, announced: Option<&str>) -> bool {
     matches!((load, announced), (Some(a), Some(b)) if a != b)

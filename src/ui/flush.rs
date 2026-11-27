@@ -349,15 +349,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 // or undo that stop. `rearm` decides it in the same exchange that mints.
                 let player = state.player.clone();
                 crate::state::rt_handle().spawn(async move {
-                    match player.rearm(
-                        track.url,
-                        track.format,
-                        track.key,
-                        track.product_id,
-                        position,
-                        play,
-                        expected_gen,
-                    ) {
+                    match player.rearm(track, position, play, expected_gen) {
                         crate::player::Continuation::Started => {
                             crate::vprintln!("[REPLAY] re-armed retained source");
                         }

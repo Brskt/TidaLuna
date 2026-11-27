@@ -79,11 +79,14 @@ async fn a_rearm_keeps_the_owner_of_the_load_it_rearms() {
 /// A re-arm of the load `expected_gen`, the way the `ReplayRequest` consumer issues it.
 fn rearm_of(player: &Player, expected_gen: u32) -> Continuation {
     player.rearm(
-        // Nothing listens there: the re-armed load fails on its own, off this test's path.
-        "http://127.0.0.1:9/mediatracks/cast.flac".to_string(),
-        "flac".to_string(),
-        String::new(),
-        Some("1".to_string()),
+        crate::state::TrackInfo {
+            // Nothing listens there: the re-armed load fails on its own, off this test's path.
+            url: "http://127.0.0.1:9/mediatracks/cast.flac".to_string(),
+            format: "flac".to_string(),
+            key: String::new(),
+            product_id: Some("1".to_string()),
+            gains: crate::player::normalization::TrackGains::UNITY,
+        },
         None,
         false,
         expected_gen,
@@ -146,6 +149,7 @@ fn staged_next(load_gen: u32) -> crate::state::RetainedTrack {
             format: "flac".to_string(),
             key: String::new(),
             product_id: Some("2".to_string()),
+            gains: crate::player::normalization::TrackGains::UNITY,
         },
         load_gen,
     }

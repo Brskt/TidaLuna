@@ -52,6 +52,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.asio_watchdog_at = None;
         self.last_asio_pos = None;
         let opened_under = self.load_seq;
+        // The committed track's, read here: every ASIO spawn, re-spawn included, funnels
+        // through this one place.
+        let gains = self.current_gains;
         thread::spawn(move || {
             if let Err(e) = crate::player::asio::host::stream_reader_to_asio(
                 reader,
@@ -64,6 +67,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 start_paused,
                 seek_rx,
                 consumed,
+                gains,
             ) && !cancel.load(Relaxed)
             {
                 crate::vprintln!("[ASIO] Stream decode failed: {e}");
@@ -108,9 +112,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[ASIO] teardown still draining; this load plays shared");
                 return false;
             }
-            let Some(handle) =
-                AsioHandle::spawn(self.exclusive_gain.clone(), self.current_device_id.clone())
-            else {
+            let Some(handle) = AsioHandle::spawn(
+                self.exclusive_gain.clone(),
+                self.normalization.clone(),
+                self.current_device_id.clone(),
+            ) else {
                 // Same fallback as the two guards above: with no control thread there is no
                 // ASIO pipeline, and the shared one is what actually gets played and polled.
                 self.is_asio_mode = false;

@@ -5,23 +5,26 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// A retained source: what to fetch it with, and the id the frontend knows it by. The id lives
 /// here because the paths that replay a retained source (a re-arm, a recover) are handed no id
 /// of their own, and a measurement taken on a replay must still name its track.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct TrackInfo {
     pub url: String,
     pub key: String,
     pub format: String,
     pub product_id: Option<String>,
+    /// The track's loudness factors, carried for every replay of the source to play at its own.
+    pub gains: crate::player::normalization::TrackGains,
 }
 
-/// Equality answers "is this the same source", which is what preload matching asks, and the id
-/// has no part in that. It must not: the preload delegate strips identity before Rust sees it;
-/// a preloaded copy carries `None` while the load that comes to claim it carries the real id.
-/// Comparing ids here would make every gapless preload hit miss.
+/// Equality answers "is this the same source", which is what preload matching asks. Neither the id
+/// nor the gains take part: the preload delegate strips identity before Rust sees it (a copy
+/// carrying `None` would miss the load that claims it), and the gains follow from the source.
 impl PartialEq for TrackInfo {
     fn eq(&self, other: &Self) -> bool {
         self.url == other.url && self.key == other.key && self.format == other.format
     }
 }
+
+impl Eq for TrackInfo {}
 
 #[derive(Clone, Debug, Default)]
 pub struct TrackMetadata {

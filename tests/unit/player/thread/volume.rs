@@ -20,6 +20,7 @@ fn the_thread_starts_at_the_restored_level() {
         Some(restored),
         Arc::new(Mutex::new(None)),
         crate::audio::bandwidth::GovernorHandle::ungoverned(),
+        crate::player::normalization::Normalization::default(),
     )
     .expect("construction opens no device and cannot fail off Windows");
     assert_eq!(f32::from_bits(player.volume.load(Relaxed)), 0.4);

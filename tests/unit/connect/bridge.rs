@@ -184,6 +184,7 @@ fn events_of_a_track() -> Vec<PlayerEvent> {
                 key: String::new(),
                 format: "flac".to_string(),
                 product_id: None,
+                gains: crate::player::normalization::TrackGains::UNITY,
             },
             expected_gen: 1,
             position: None,

@@ -151,6 +151,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             load_start,
             cached,
             format,
+            gains,
         } = req;
         if load_gen != current_gen() {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
@@ -174,6 +175,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         self.current_track_id = Some(track_id.clone());
         self.current_product_id = product_id;
+        // Set, never kept: a load that names none plays untouched, not at the last track's.
+        self.current_gains = gains;
         self.set_committed_track(Some((track_id.clone(), format.clone())));
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
@@ -367,7 +370,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let cpal_start = std::time::Instant::now();
         let opened =
-            match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
+            match open_output_stream(
+                &device,
+                source_sample_rate,
+                source_channels,
+                &self.output_gain(),
+            ) {
                 Some(o) => o,
                 None => {
                     let kind = DeviceErrorKind::FormatNotSupported;

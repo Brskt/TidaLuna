@@ -15,6 +15,7 @@ mod length;
 pub(crate) use length::dash_fixture;
 mod load;
 mod load_state;
+pub(crate) mod normalization;
 // Compiled where it serves and where it is tested: only the two Windows engines consult it,
 // but the classification is pure and its tests earn their place on every host.
 #[cfg(any(target_os = "windows", test))]
@@ -82,6 +83,8 @@ pub struct Player {
     level_store: Option<LevelStore>,
     /// The one governor arbitrating this player's link between its playback and its preload.
     governor: GovernorHandle,
+    /// The "Normalize volume" mode, shared with the thread and every output path.
+    normalization: normalization::Normalization,
 }
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
@@ -136,6 +139,8 @@ impl Player {
             crate::audio::bandwidth::spawn_governor()
         };
         let thread_governor = governor.clone();
+        let normalization = normalization::Normalization::default();
+        let thread_normalization = normalization.clone();
         std::thread::spawn(move || {
             if let Some(mut pt) = thread::PlayerThread::new(
                 cmd_rx,
@@ -144,6 +149,7 @@ impl Player {
                 thread_level,
                 thread_committed,
                 thread_governor,
+                thread_normalization,
             ) {
                 pt.run();
             }
@@ -161,12 +167,18 @@ impl Player {
                 unsaved: std::sync::Arc::new(std::sync::Mutex::new(None)),
             }),
             governor,
+            normalization,
         }
     }
 
     /// The governor a preload staged for this player shares with its playback.
     pub fn governor(&self) -> &GovernorHandle {
         &self.governor
+    }
+
+    /// TIDAL's "Normalize volume" setting: the playing track follows it at its next buffer.
+    pub(crate) fn set_normalization(&self, mode: normalization::NormalizationMode) {
+        self.normalization.set(mode);
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {

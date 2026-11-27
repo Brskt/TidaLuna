@@ -18,6 +18,8 @@ struct AsioFeed {
     opened_under: u32,
     start_paused: bool,
     consumed: Arc<AtomicU64>,
+    /// The track's loudness factors, carried on the StartStream.
+    gains: crate::player::normalization::TrackGains,
 }
 
 impl FeedSink for AsioFeed {
@@ -57,6 +59,7 @@ impl FeedSink for AsioFeed {
                 start_secs,
                 start_paused: self.start_paused,
                 consumed: self.consumed.clone(),
+                gains: self.gains,
             },
             Feed::ResetForSeek { gen_id, start_secs } => AsioCommand::ResetForSeek {
                 stream_id,
@@ -108,6 +111,7 @@ pub(crate) fn stream_reader_to_asio(
     start_paused: bool,
     seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
+    gains: crate::player::normalization::TrackGains,
 ) -> Result<(), String> {
     let whole = reader.clone();
     let sink = AsioFeed {
@@ -116,6 +120,7 @@ pub(crate) fn stream_reader_to_asio(
         opened_under,
         start_paused,
         consumed: consumed.clone(),
+        gains,
     };
     decode_feed::run(
         sink,

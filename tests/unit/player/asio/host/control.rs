@@ -11,7 +11,7 @@ const STREAM: u32 = 7;
 const OPENED_UNDER: u32 = 3;
 
 fn control() -> ControlCtx {
-    ControlCtx::new(Arc::new(AtomicU32::new(0)), None)
+    ControlCtx::new(Arc::new(AtomicU32::new(0)), Normalization::default(), None)
 }
 
 /// A control thread that has adopted `STREAM` for the load `OPENED_UNDER`, its announcements

@@ -15,6 +15,7 @@ use super::convert::{AsioSampleType, apply_gain, write_dst_sample};
 use super::iasio::{AsioBool, AsioSampleRate, AsioTime, output_ready_raw};
 use crate::player::PlaybackState;
 use crate::player::declick::{fade_in_env, fade_out_env, fade_scale};
+use crate::player::normalization::{Normalization, TrackGains};
 use crate::player::packet_failure::PacketFailure;
 
 mod control;
@@ -97,6 +98,10 @@ struct StreamCtx {
     /// Digital gain as f32 bits (1.0 = bit-perfect passthrough). Live, letting the
     /// control thread drive it from the volume slider.
     gain: Arc<AtomicU32>,
+    /// The live "Normalize volume" mode, read once per buffer.
+    normalization: Normalization,
+    /// The adopted track's loudness factors (`TrackGains::to_bits`), written by the control thread.
+    track_gains: Arc<AtomicU64>,
     /// Lock-free ring consumer; touched only on the driver RT thread.
     consumer: UnsafeCell<rtrb::Consumer<i32>>,
     /// Pre-allocated interleaved-i32 scratch (`frames * channels`).
@@ -282,7 +287,10 @@ unsafe extern "system" fn stream_buffer_switch(
     }
 
     let bps = ctx.bps;
-    let gain = f32::from_bits(ctx.gain.load(Ordering::Relaxed));
+    // The slider's gain times the track's loudness factor: unity on both keeps the passthrough.
+    let gain = f32::from_bits(ctx.gain.load(Ordering::Relaxed))
+        * TrackGains::from_bits(ctx.track_gains.load(Ordering::Relaxed))
+            .factor(ctx.normalization.mode());
     for ch in 0..channels {
         let base = ctx.out_buffers[ch][half];
         if base.is_null() {
@@ -324,6 +332,8 @@ pub(crate) enum AsioCommand {
         start_secs: f64,
         start_paused: bool,
         consumed: Arc<AtomicU64>,
+        /// The stream's track's loudness factors.
+        gains: TrackGains,
     },
     PushPcm {
         stream_id: u32,

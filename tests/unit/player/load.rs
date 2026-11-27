@@ -159,6 +159,7 @@ async fn a_refused_connection_publishes_no_credential() {
         cmd_tx,
         format: "flac".to_string(),
         product_id: None,
+        gains: crate::player::normalization::TrackGains::UNITY,
         cancel_token: CancellationToken::new(),
         governor: crate::audio::bandwidth::GovernorHandle::ungoverned(),
     };
@@ -214,6 +215,7 @@ async fn a_failed_dash_load_publishes_no_credential_on_any_arm() {
             )),
             "flac".to_string(),
             None,
+            crate::player::normalization::TrackGains::UNITY,
             LoadOrigin::Local,
         );
 
@@ -234,6 +236,7 @@ async fn a_failed_load_names_the_seq_the_load_answered() {
         one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
         "flac".to_string(),
         None,
+        crate::player::normalization::TrackGains::UNITY,
         LoadOrigin::Local,
     );
 

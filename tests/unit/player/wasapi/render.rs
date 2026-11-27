@@ -225,6 +225,7 @@ fn stream_seven(start_paused: bool) -> StreamStart {
         start_paused,
         consumed: Arc::new(AtomicU64::new(0)),
         cancel: Arc::new(AtomicBool::new(false)),
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 

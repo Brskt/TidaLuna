@@ -2,9 +2,10 @@
 //! a device: the callback is a closure over rings.
 
 use super::{
-    CrossfadeLink, CrossfadeSlot, MIX_QUANTUM, build_cpal_callback, pack_xfade_done,
+    CrossfadeLink, CrossfadeSlot, MIX_QUANTUM, OutputGain, build_cpal_callback, pack_xfade_done,
     unpack_xfade_done,
 };
+use crate::player::normalization::{Normalization, NormalizationMode, TrackGains};
 use crate::player::thread::output::fixture::peak;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -45,6 +46,32 @@ fn callback_counting(
     impl FnMut(&mut [f32], &cpal::OutputCallbackInfo),
     Arc<AtomicU64>,
 ) {
+    callback_gained(
+        xfade,
+        outgoing,
+        ring_frames,
+        full_level(TrackGains::UNITY, &Normalization::default()),
+    )
+}
+
+/// Full scale for the listener, `gains` for the playing track, under `normalization`'s mode.
+fn full_level(gains: TrackGains, normalization: &Normalization) -> OutputGain {
+    OutputGain {
+        volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+        normalization: normalization.clone(),
+        gains,
+    }
+}
+
+fn callback_gained(
+    xfade: &CrossfadeLink,
+    outgoing: f32,
+    ring_frames: usize,
+    gain: OutputGain,
+) -> (
+    impl FnMut(&mut [f32], &cpal::OutputCallbackInfo),
+    Arc<AtomicU64>,
+) {
     let played_samples = Arc::new(AtomicU64::new(0));
     let (mut producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_frames);
     for _ in 0..ring_frames {
@@ -57,7 +84,7 @@ fn callback_counting(
     std::mem::forget(producer);
     let callback = build_cpal_callback(
         consumer,
-        Arc::new(AtomicU32::new(1.0f32.to_bits())),
+        gain,
         Arc::new(AtomicU32::new(0)),
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
@@ -75,6 +102,16 @@ fn offer_fade(xfade: &CrossfadeLink, sample: f32, len_samples: usize) {
 /// The same with the ring sized by the caller. A fade driven across several passes needs
 /// more than one callback's worth staged to reach its end.
 fn offer_fade_sized(xfade: &CrossfadeLink, sample: f32, len_samples: usize, ring_frames: usize) {
+    offer_fade_gained(xfade, sample, len_samples, ring_frames, TrackGains::UNITY);
+}
+
+fn offer_fade_gained(
+    xfade: &CrossfadeLink,
+    sample: f32,
+    len_samples: usize,
+    ring_frames: usize,
+    gains: TrackGains,
+) {
     let (mut producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_frames);
     for _ in 0..ring_frames {
         producer.push(sample).expect("the ring was sized for this");
@@ -83,7 +120,67 @@ fn offer_fade_sized(xfade: &CrossfadeLink, sample: f32, len_samples: usize, ring
     *xfade.attach.lock().unwrap() = Some(CrossfadeSlot {
         consumer,
         len_samples,
+        gains,
     });
+}
+
+#[test]
+fn a_track_plays_at_its_own_loudness_factor_under_the_live_mode() {
+    let normalization = Normalization::default();
+    normalization.set(NormalizationMode::Album);
+    let xfade = CrossfadeLink::new();
+    let (mut callback, _) = callback_gained(
+        &xfade,
+        1.0,
+        CB_FRAMES * 4,
+        full_level(TrackGains::new(0.5, 0.25), &normalization),
+    );
+
+    let mut data = vec![0.0f32; CB_FRAMES];
+    callback(&mut data, &callback_info());
+    assert!(data.iter().all(|s| *s == 0.5), "album factor");
+
+    // A toggle re-applies the volume; here the next buffer follows the mode.
+    normalization.set(NormalizationMode::Track);
+    callback(&mut data, &callback_info());
+    assert!(data.iter().all(|s| *s == 0.25), "track factor");
+
+    normalization.set(NormalizationMode::Off);
+    callback(&mut data, &callback_info());
+    assert!(data.iter().all(|s| *s == 1.0), "normalization off");
+}
+
+#[test]
+fn a_faded_in_track_keeps_its_own_factor_once_promoted() {
+    let normalization = Normalization::default();
+    normalization.set(NormalizationMode::Album);
+    let xfade = CrossfadeLink::new();
+    xfade.out_eof.store(true, Relaxed);
+    offer_fade_gained(
+        &xfade,
+        1.0,
+        CB_FRAMES,
+        CB_FRAMES * 4,
+        TrackGains::new(0.25, 0.25),
+    );
+    let (mut callback, _) = callback_gained(
+        &xfade,
+        0.0,
+        CB_FRAMES,
+        full_level(TrackGains::UNITY, &normalization),
+    );
+
+    let mut data = vec![0.0f32; CB_FRAMES];
+    callback(&mut data, &callback_info());
+    assert!(
+        data.iter().all(|s| *s <= 0.25),
+        "the incoming voice was mixed above its factor"
+    );
+    callback(&mut data, &callback_info());
+    assert!(
+        data.iter().all(|s| *s == 0.25),
+        "the promoted track lost its factor"
+    );
 }
 
 #[test]

@@ -55,6 +55,7 @@ async fn an_announced_length_names_the_track_its_load_carried() {
             load_start: std::time::Instant::now(),
             cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
+            gains: crate::player::normalization::TrackGains::UNITY,
         },
         false,
     );
@@ -104,6 +105,7 @@ async fn a_probe_failure_names_its_load_and_ends_the_track() {
             load_start: std::time::Instant::now(),
             cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
+            gains: crate::player::normalization::TrackGains::UNITY,
         },
         false,
     );
@@ -250,6 +252,7 @@ fn track_a() -> crate::state::TrackInfo {
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("a-product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 

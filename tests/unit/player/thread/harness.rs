@@ -42,6 +42,7 @@ pub(super) fn harness() -> Harness {
         None,
         Arc::new(Mutex::new(None)),
         crate::audio::bandwidth::GovernorHandle::ungoverned(),
+        crate::player::normalization::Normalization::default(),
     )
     .expect("construction opens no device and cannot fail off Windows");
 
@@ -88,6 +89,7 @@ pub(super) fn load_req_of(
         load_start: std::time::Instant::now(),
         cached: Some(crate::player::cache::Generation::NONE),
         format: "flac".to_string(),
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 

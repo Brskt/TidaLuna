@@ -2,7 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
-use super::mixer::{CrossfadeLink, build_cpal_callback};
+use super::mixer::{CrossfadeLink, OutputGain, build_cpal_callback};
 use super::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_UNKNOWN};
 use crate::player::AudioDevice;
 
@@ -122,7 +122,7 @@ fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize
 fn open_with_config(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    volume: &Arc<AtomicU32>,
+    gain: &OutputGain,
     seek_gen: &Arc<AtomicU32>,
     muted: &Arc<AtomicBool>,
     mute_ack: &Arc<AtomicBool>,
@@ -136,7 +136,7 @@ fn open_with_config(
 
     let cb = build_cpal_callback(
         consumer,
-        volume.clone(),
+        gain.clone(),
         seek_gen.clone(),
         muted.clone(),
         mute_ack.clone(),
@@ -206,7 +206,7 @@ pub(in crate::player::thread) fn open_output_stream(
     device: &cpal::Device,
     source_rate: u32,
     source_channels: u16,
-    volume: &Arc<AtomicU32>,
+    gain: &OutputGain,
 ) -> Option<OpenedStream> {
     let seek_gen = Arc::new(AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
@@ -243,7 +243,7 @@ pub(in crate::player::thread) fn open_output_stream(
         match open_with_config(
             device,
             &config,
-            volume,
+            gain,
             &seek_gen,
             &muted,
             &mute_ack,

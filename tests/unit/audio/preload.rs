@@ -17,6 +17,7 @@ pub(crate) fn staged(url: &str) -> TrackInfo {
         key: "key".to_string(),
         format: "flac".to_string(),
         product_id: Some("product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 
@@ -280,6 +281,7 @@ async fn a_head_that_never_arrives_stops_its_download() {
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     };
     // Staging answers to an attempt now. The test claims one the way `start_preload` does:
     // without it, nothing would own the slot and the token would never be recorded at all.
@@ -350,6 +352,7 @@ async fn a_download_that_ends_before_its_head_gives_the_slot_back_at_once() {
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     };
     let attempt = preload_state()
         .claim(&track, crate::player::current_gen())
@@ -413,6 +416,7 @@ async fn a_load_adopts_a_staging_download_before_its_head_lands() {
         key: String::new(),
         format: "flac".to_string(),
         product_id: Some("product".to_string()),
+        gains: crate::player::normalization::TrackGains::UNITY,
     };
     let attempt = preload_state()
         .claim(&track, crate::player::current_gen())

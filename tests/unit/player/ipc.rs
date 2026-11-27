@@ -5,6 +5,7 @@ use super::{
     parse_player_ipc,
 };
 use crate::player::LoadOrigin;
+use crate::player::normalization::{NormalizationMode, TrackGains};
 use serde_json::json;
 
 #[test]
@@ -61,10 +62,61 @@ fn a_preload_carries_the_track_it_is_for() {
                 format: "flac".to_string(),
                 key: "k".to_string(),
                 product_id: expected.map(ToString::to_string),
+                gains: TrackGains::UNITY,
             },
             "{args:?}"
         );
     }
+}
+
+/// The track's two loudness factors ride last on the command that names it, and a sender that
+/// sends none (an older renderer, a plugin) plays the track untouched.
+#[test]
+fn a_track_carries_its_loudness_factors_on_the_command_that_names_it() {
+    let gains = |parsed: PlayerIpc| match parsed {
+        PlayerIpc::Load { gains, .. }
+        | PlayerIpc::Preload { gains, .. }
+        | PlayerIpc::LoadDash { gains, .. } => gains,
+        other => panic!("not a command that names a track: {other:?}"),
+    };
+    let head = [json!("https://a"), json!("flac"), json!("k")];
+    let load = [
+        &head[..],
+        &[
+            json!(false),
+            json!(false),
+            json!("1"),
+            json!(null),
+            json!(null),
+        ],
+        &[json!(0.5), json!(0.25)],
+    ]
+    .concat();
+    assert_eq!(
+        gains(parse_player_ipc("player.load", &load, None).unwrap()),
+        TrackGains::new(0.5, 0.25)
+    );
+    let preload = [&head[..], &[json!("1"), json!(0.5), json!(0.25)]].concat();
+    assert_eq!(
+        gains(parse_player_ipc("player.preload", &preload, None).unwrap()),
+        TrackGains::new(0.5, 0.25)
+    );
+    let dash = [
+        json!("https://init"),
+        json!("[\"https://s1\"]"),
+        json!("aac"),
+        json!("1"),
+        json!(0.5),
+        json!(0.25),
+    ];
+    assert_eq!(
+        gains(parse_player_ipc("player.load_dash", &dash, None).unwrap()),
+        TrackGains::new(0.5, 0.25)
+    );
+    assert_eq!(
+        gains(parse_player_ipc("player.load", &head, None).unwrap()),
+        TrackGains::UNITY
+    );
 }
 
 #[test]
@@ -101,6 +153,7 @@ fn a_dash_load_carries_its_track_and_is_refused_without_a_segment_or_an_init_url
                 segment_urls: SegmentUrls::new(vec!["https://s1".to_string()]).unwrap(),
                 format: "aac".to_string(),
                 product_id: Some("777".to_string()),
+                gains: TrackGains::UNITY,
             }),
         ),
         (
@@ -206,6 +259,7 @@ fn load() -> PlayerIpc {
         want_play: true,
         load_id: None,
         act: None,
+        gains: TrackGains::UNITY,
     }
 }
 
@@ -215,6 +269,7 @@ fn load_dash() -> PlayerIpc {
         segment_urls: SegmentUrls::new(vec!["https://cdn/1.mp4".to_string()]).unwrap(),
         format: "mp4a".to_string(),
         product_id: Some("2".to_string()),
+        gains: TrackGains::UNITY,
     }
 }
 
@@ -250,8 +305,12 @@ fn passthroughs() -> Vec<PlayerIpc> {
             format: "flac".to_string(),
             key: String::new(),
             product_id: Some("3".to_string()),
+            gains: TrackGains::UNITY,
         },
         PlayerIpc::PreloadCancel,
+        PlayerIpc::Normalization {
+            mode: NormalizationMode::Album,
+        },
         PlayerIpc::Play,
         PlayerIpc::Pause,
         PlayerIpc::Seek { time: 30.0 },
@@ -286,6 +345,7 @@ fn a_cast_holds_back_only_the_commands_that_replace_its_track() {
         want_play: act.is_some(),
         load_id: Some(7),
         act,
+        gains: TrackGains::UNITY,
     };
     let routed = |act: Option<ListenerAct>| {
         CastGate::Route(CastLoad {
@@ -361,5 +421,6 @@ fn sdk_load(product_id: Option<&str>, pick: bool) -> PlayerIpc {
         want_play: pick,
         load_id: Some(7),
         act: pick.then_some(ListenerAct::Pick),
+        gains: TrackGains::UNITY,
     }
 }

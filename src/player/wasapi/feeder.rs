@@ -73,6 +73,8 @@ struct WasapiFeed {
     consumed: Arc<AtomicU64>,
     // The spawn's cancel, carried on the StartStream for the render to judge it by.
     cancel: Arc<AtomicBool>,
+    // The track's loudness factors, carried on the StartStream for the render to bind.
+    gains: crate::player::normalization::TrackGains,
     // The source's depth and the endpoint's, both set by `adopt_format` before any packet.
     bits_per_sample: u32,
     stored_bps: u32,
@@ -135,6 +137,7 @@ impl FeedSink for WasapiFeed {
                     start_paused: self.start_paused,
                     consumed: self.consumed.clone(),
                     cancel: self.cancel.clone(),
+                    gains: self.gains,
                 })
             }
             Feed::ResetForSeek { gen_id, start_secs } => ExclusiveCommand::ResetForSeek {
@@ -201,6 +204,7 @@ pub(in crate::player) fn stream_flac_reader_to_wasapi(
     start_paused: bool,
     seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
+    gains: crate::player::normalization::TrackGains,
 ) -> Result<(), String> {
     let whole = reader.clone();
     let source = Box::new(SizedMediaSource {
@@ -216,6 +220,7 @@ pub(in crate::player) fn stream_flac_reader_to_wasapi(
         start_paused,
         consumed: consumed.clone(),
         cancel: cancel.clone(),
+        gains,
         bits_per_sample: 0,
         stored_bps: 0,
         sample_buf: Vec::new(),

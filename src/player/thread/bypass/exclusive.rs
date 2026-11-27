@@ -54,6 +54,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // current_asio_stream_id).
         self.current_exclusive_stream_id = Some(stream_id);
         let opened_under = self.load_seq;
+        // The committed track's, read here: every exclusive spawn, re-spawn included, funnels
+        // through this one place.
+        let gains = self.current_gains;
         thread::spawn(move || {
             if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
                 reader,
@@ -67,6 +70,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 start_paused,
                 seek_rx,
                 consumed,
+                gains,
             ) && !cancel.load(Relaxed)
             {
                 crate::vprintln!("[WASAPI] Stream decode failed: {e}");

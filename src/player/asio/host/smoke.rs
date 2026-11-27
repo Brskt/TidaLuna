@@ -587,6 +587,11 @@ fn run_ring_to_asio(
             out_buffers,
             com: driver.as_ptr(),
             gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            // The smoke tone is no track: normalization off, unity factors.
+            normalization: crate::player::normalization::Normalization::default(),
+            track_gains: Arc::new(AtomicU64::new(
+                crate::player::normalization::TrackGains::UNITY.to_bits(),
+            )),
             consumer: UnsafeCell::new(consumer),
             scratch: UnsafeCell::new(vec![0i32; frames * channels].into_boxed_slice()),
             flush_gen: Arc::new(AtomicU32::new(0)),

@@ -128,6 +128,8 @@ impl SpeakerBridge {
                     segments,
                     format,
                     media_id,
+                    // A controller's track: not one the page's normalization names.
+                    crate::player::normalization::TrackGains::UNITY,
                     crate::player::LoadOrigin::Connect,
                 )
             });

@@ -37,6 +37,7 @@ fn track(url: &str) -> TrackInfo {
         key: String::new(),
         format: "flac".to_string(),
         product_id: None,
+        gains: crate::player::normalization::TrackGains::UNITY,
     }
 }
 

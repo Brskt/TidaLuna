@@ -142,11 +142,17 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     product_id,
                     restart,
                     want_play,
+                    gains,
                     ..
                 } => {
-                    state
-                        .player
-                        .load(url, format, key, product_id, restart, want_play);
+                    let track = TrackInfo {
+                        url,
+                        format,
+                        key,
+                        product_id,
+                        gains,
+                    };
+                    state.player.load(track, restart, want_play);
                     PlayerIpcEffects::default()
                 }
                 PlayerIpc::LoadDash {
@@ -154,12 +160,14 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     segment_urls,
                     format,
                     product_id,
+                    gains,
                 } => {
                     state.player.load_dash(
                         init_url,
                         segment_urls,
                         format,
                         product_id,
+                        gains,
                         crate::player::LoadOrigin::Local,
                     );
                     PlayerIpcEffects::default()
@@ -178,6 +186,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     format,
                     key,
                     product_id,
+                    gains,
                 } => {
                     // The renderer names the track by the SDK's playbackinfo answer the
                     // stream came from; the SDK's own delegate carries only the url triple.
@@ -189,6 +198,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         format,
                         key,
                         product_id,
+                        gains,
                     };
                     let governor = state.player.governor().clone();
                     crate::state::rt_handle().spawn(async move {
@@ -200,6 +210,10 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     crate::state::rt_handle().spawn(async {
                         crate::audio::preload::cancel_preload().await;
                     });
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Normalization { mode } => {
+                    state.player.set_normalization(mode);
                     PlayerIpcEffects::default()
                 }
                 PlayerIpc::Metadata { payload } => {

@@ -50,6 +50,7 @@ async fn a_download_that_dies_before_the_pre_buffer_target_still_publishes_at_on
         cmd_tx,
         format: "flac".to_string(),
         product_id: None,
+        gains: crate::player::normalization::TrackGains::UNITY,
         cancel_token: CancellationToken::new(),
         governor: crate::audio::bandwidth::GovernorHandle::ungoverned(),
     };

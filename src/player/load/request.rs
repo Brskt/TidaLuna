@@ -1,10 +1,9 @@
 use super::sources::{start_stream_load, try_cache_hit, try_preload_hit};
 use super::{LoadContext, LoadRequest, LoadSettleGuard, LoadStep, ResumePolicy, SegmentUrls};
 use crate::player::buffer::RamBuffer;
+use crate::player::normalization::TrackGains;
 use crate::player::resume;
-use crate::player::track_identity::{
-    is_same_active_track, print_track_banner, retained_product_id,
-};
+use crate::player::track_identity::{is_same_active_track, print_track_banner, retained_identity};
 use crate::player::{
     Continuation, LoadOrigin, MediaErrorCode, Player, PlayerCommand, begin_load,
     canonical_track_id, continue_load, current_gen, format_bytes, next_event_seq,
@@ -20,14 +19,18 @@ impl Player {
     /// carries. Starting a load cannot fail: its failures settle later, as `LoadFailed`.
     fn load_with_policy(
         &self,
-        url: String,
-        format: String,
-        key: String,
-        product_id: Option<String>,
+        track: TrackInfo,
         resume_policy: ResumePolicy,
         auto_play: bool,
         load_gen: u32,
     ) -> u32 {
+        let TrackInfo {
+            url,
+            format,
+            key,
+            product_id,
+            gains,
+        } = track;
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -72,6 +75,7 @@ impl Player {
                     format: format.clone(),
                     key: key.clone(),
                     product_id: product_id.clone(),
+                    gains,
                 }),
             );
         }
@@ -85,6 +89,7 @@ impl Player {
             cmd_tx: self.cmd_tx.clone(),
             format: format.clone(),
             product_id,
+            gains,
             cancel_token,
             governor: self.governor.clone(),
         };
@@ -99,6 +104,7 @@ impl Player {
                 format: format.clone(),
                 key: key.clone(),
                 product_id: ctx.product_id.clone(),
+                gains: ctx.gains,
             };
             let track_id = canonical_track_id(&url);
 
@@ -127,15 +133,14 @@ impl Player {
         event_seq
     }
 
-    pub fn load(
-        &self,
-        url: String,
-        format: String,
-        key: String,
-        product_id: Option<String>,
-        restart: bool,
-        want_play: bool,
-    ) {
+    pub fn load(&self, track: TrackInfo, restart: bool, want_play: bool) {
+        let TrackInfo {
+            url,
+            format,
+            key,
+            product_id,
+            gains,
+        } = track;
         // Idempotent reconcile: when the SDK re-loads the track currently COMMITTED in
         // the pipeline, either restart it (a fresh play instance) or resume it in place
         // (a keep-position re-assert), without a full rebuild. The comparison is against
@@ -168,10 +173,13 @@ impl Player {
                     short_id(&canonical_url_id, 60)
                 );
                 self.load_with_policy(
-                    url,
-                    format,
-                    key,
-                    product_id,
+                    TrackInfo {
+                        url,
+                        format,
+                        key,
+                        product_id,
+                        gains,
+                    },
                     ResumePolicy::Restart,
                     want_play,
                     begin_load(LoadOrigin::Local),
@@ -221,10 +229,13 @@ impl Player {
         // the SELECT's play-intent into the load: no separate player.play arrives while
         // the OLD track is still committed (decide_play would Resume it -> audible bleed).
         self.load_with_policy(
-            url,
-            format,
-            key,
-            product_id,
+            TrackInfo {
+                url,
+                format,
+                key,
+                product_id,
+                gains,
+            },
             ResumePolicy::Disabled,
             want_play,
             begin_load(LoadOrigin::Local),
@@ -242,11 +253,15 @@ impl Player {
         product_id: Option<String>,
         origin: LoadOrigin,
     ) -> u32 {
+        // Unity by construction: the controller's track is not one the page's normalization names.
         self.load_with_policy(
-            url,
-            format,
-            key,
-            product_id,
+            TrackInfo {
+                url,
+                format,
+                key,
+                product_id,
+                gains: TrackGains::UNITY,
+            },
             ResumePolicy::Disabled,
             true,
             begin_load(origin),
@@ -261,16 +276,7 @@ impl Player {
         let Some(load_gen) = continue_load(next.load_gen) else {
             return Continuation::Superseded;
         };
-        let track = next.track;
-        self.load_with_policy(
-            track.url,
-            track.format,
-            track.key,
-            track.product_id,
-            ResumePolicy::Disabled,
-            true,
-            load_gen,
-        );
+        self.load_with_policy(next.track, ResumePolicy::Disabled, true, load_gen);
         Continuation::Started
     }
 
@@ -282,6 +288,7 @@ impl Player {
         segment_urls: SegmentUrls,
         format: String,
         product_id: Option<String>,
+        gains: TrackGains,
         origin: LoadOrigin,
     ) -> u32 {
         // Both the IPC channel and the Connect receiver reach this function. Which of the two
@@ -442,6 +449,7 @@ impl Player {
                     load_start,
                     cached: None,
                     format,
+                    gains,
                 },
                 auto_play: true,
             });
@@ -464,12 +472,15 @@ impl Player {
         // The SDK's `recover` delegate carries only a url and a key: the id comes from the
         // retained source instead. A recover re-fetches the track already playing, never
         // another; the retained id is that track's own.
-        let product_id = retained_product_id(&canonical_track_id(&url));
+        let (product_id, gains) = retained_identity(&canonical_track_id(&url));
         self.load_with_policy(
-            url,
-            format,
-            key,
-            product_id,
+            TrackInfo {
+                url,
+                format,
+                key,
+                product_id,
+                gains,
+            },
             Self::resume_policy_for(target_time),
             false,
             begin_load(LoadOrigin::Local),
@@ -484,10 +495,7 @@ impl Player {
     /// since. A re-arm over a newer load would abort it, and over a stop would undo it.
     pub fn rearm(
         &self,
-        url: String,
-        format: String,
-        key: String,
-        product_id: Option<String>,
+        track: TrackInfo,
         position: Option<f64>,
         play: bool,
         expected_gen: u32,
@@ -502,7 +510,7 @@ impl Player {
             Some(t) => ResumePolicy::Explicit(t),
             None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(url, format, key, product_id, policy, play, load_gen);
+        self.load_with_policy(track, policy, play, load_gen);
         Continuation::Started
     }
 }

@@ -24,6 +24,7 @@ use crate::player::asio::iasio::{
 use crate::player::declick::{
     DECLICK_FADE_MS, RESYNC_SILENCE_MS, fade_out_wait_ms, silence_frames,
 };
+use crate::player::normalization::{Normalization, TrackGains};
 use crate::player::packet_failure::PacketFailure;
 
 /// Absolute frame index for a position in seconds, the `played_frames` baseline so
@@ -69,6 +70,10 @@ struct OpenedAsioStream {
 struct ControlCtx {
     /// Shared digital gain (f32 bits), cloned into each `StreamCtx`.
     gain: Arc<AtomicU32>,
+    /// The live "Normalize volume" mode, cloned into each `StreamCtx`.
+    normalization: Normalization,
+    /// The adopted track's loudness factors (`TrackGains::to_bits`), shared with each `StreamCtx`.
+    track_gains: Arc<AtomicU64>,
     /// The adopted stream's consumed counter (minted per decoder spawn):
     /// credited as samples leave staging or are discarded, keeping the decoder's
     /// sent-minus-consumed throttle honest even while this thread is stuck
@@ -135,9 +140,15 @@ struct ControlCtx {
 }
 
 impl ControlCtx {
-    fn new(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Self {
+    fn new(
+        gain: Arc<AtomicU32>,
+        normalization: Normalization,
+        requested_driver: Option<String>,
+    ) -> Self {
         Self {
             gain,
+            normalization,
+            track_gains: Arc::new(AtomicU64::new(TrackGains::UNITY.to_bits())),
             consumed: Arc::new(AtomicU64::new(0)),
             driver: None,
             requested_driver,
@@ -292,6 +303,8 @@ impl ControlCtx {
                 out_buffers,
                 com: driver.as_ptr(),
                 gain: self.gain.clone(),
+                normalization: self.normalization.clone(),
+                track_gains: self.track_gains.clone(),
                 consumer: UnsafeCell::new(consumer),
                 scratch: UnsafeCell::new(vec![0i32; frames * channels].into_boxed_slice()),
                 flush_gen: flush_gen.clone(),
@@ -1054,7 +1067,12 @@ impl ControlCtx {
                 start_secs,
                 start_paused,
                 consumed,
+                gains,
             } => {
+                // Every adoption below, deferred or not, plays the new track: its factor
+                // applies from here. At most one buffer of the old ring meets it before the
+                // RT drains on the new flush generation.
+                self.track_gains.store(gains.to_bits(), Ordering::Relaxed);
                 if let AsioState::Rebuilding { deadline, .. } = self.state {
                     // Latest-wins supersede: a rebuild is already pending on the fading
                     // old stream. Re-target its adopted identity and keep the armed
@@ -1424,11 +1442,12 @@ fn try_open_driver(info: &AsioDriverInfo) -> Result<AsioDriver, String> {
 
 fn control_thread(
     gain: Arc<AtomicU32>,
+    normalization: Normalization,
     requested_driver: Option<String>,
     cmd_rx: mpsc::Receiver<AsioCommand>,
     event_tx: mpsc::Sender<AsioEvent>,
 ) {
-    ControlCtx::new(gain, requested_driver).run(cmd_rx, event_tx);
+    ControlCtx::new(gain, normalization, requested_driver).run(cmd_rx, event_tx);
 }
 
 /// Player-facing handle to the ASIO control thread. Mirrors `ExclusiveHandle`.
@@ -1444,12 +1463,16 @@ impl AsioHandle {
     /// enumerated one that opens. `gain` is the shared digital-gain cell (f32 bits).
     /// `None` when the OS refuses the thread. `thread::spawn` would panic there, on the
     /// player thread that called it, and nothing respawns that one.
-    pub(crate) fn spawn(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Option<Self> {
+    pub(crate) fn spawn(
+        gain: Arc<AtomicU32>,
+        normalization: Normalization,
+        requested_driver: Option<String>,
+    ) -> Option<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AsioCommand>();
         let (event_tx, event_rx) = mpsc::channel::<AsioEvent>();
         let thread = match thread::Builder::new()
             .name("asio-control".into())
-            .spawn(move || control_thread(gain, requested_driver, cmd_rx, event_tx))
+            .spawn(move || control_thread(gain, normalization, requested_driver, cmd_rx, event_tx))
         {
             Ok(t) => t,
             Err(e) => {

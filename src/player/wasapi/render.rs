@@ -11,6 +11,7 @@ use windows::Win32::System::Threading::{
 use super::endpoint::{convert_pcm_frame, init_exclusive_client, try_open_stream};
 use super::{ExclusiveCommand, ExclusiveEvent, StreamStart};
 use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
+use crate::player::normalization::{Normalization, TrackGains};
 use crate::player::packet_failure::PacketFailure;
 
 enum RenderState {
@@ -142,6 +143,9 @@ struct RenderContext {
     // The load that opened the adopted stream, echoed on its transport states. Written with
     // `current_stream_id`, meaningless without one.
     opened_under: u32,
+    // The adopted stream's loudness factors. Bound at adoption, not at load: until the new
+    // StartStream is adopted, what plays is the previous track's tail, at its own factor.
+    track_gains: TrackGains,
     // Pre-adoption transport intent (stream_id, play): a Play/Pause for a stream
     // whose probe-delayed StartStream hasn't arrived yet (FIFO makes this
     // deterministic). Every adoption consumes it: applied on id match, discarded
@@ -188,6 +192,7 @@ impl RenderContext {
             consumed: Arc::new(AtomicU64::new(0)),
             current_stream_id: None,
             opened_under: 0,
+            track_gains: TrackGains::UNITY,
             pending_transport: None,
             stream_ended: true,
             last_time_report: Instant::now(),
@@ -344,9 +349,11 @@ impl RenderContext {
             start_secs,
             start_paused,
             consumed,
+            gains,
             // Judged before the adoption, by `admits`.
             cancel: _,
         } = start;
+        self.track_gains = gains;
         self.pcm_data.clear();
         self.pcm_sample_rate = sample_rate;
         self.pcm_channels = channels;
@@ -647,8 +654,9 @@ pub(super) fn render_thread(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
+    normalization: Normalization,
 ) {
-    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain);
+    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain, normalization);
 }
 
 fn render_thread_inner(
@@ -656,6 +664,7 @@ fn render_thread_inner(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
+    normalization: Normalization,
 ) -> Result<(), ()> {
     let hr = wasapi::initialize_mta();
     if hr.is_err() {
@@ -1030,9 +1039,10 @@ fn render_thread_inner(
                     let dst_store = wf.get_bitspersample() as u32;
                     let dst_valid = wf.get_validbitspersample() as u32;
                     let dst_type = wf.get_subformat().unwrap_or(SampleType::Int);
-                    // Live digital gain (exclusive bypasses the OS mixer). At 1.0
-                    // the passthrough fast path stays bit-perfect.
-                    let g = f32::from_bits(gain.load(Relaxed));
+                    // Live digital gain (exclusive bypasses the OS mixer), times the adopted
+                    // track's loudness factor. At 1.0 the passthrough fast path stays bit-perfect.
+                    let g = f32::from_bits(gain.load(Relaxed))
+                        * ctx.track_gains.factor(normalization.mode());
 
                     let full_bytes = available * dst_bytes_per_frame;
                     let passthrough = ctx.pcm_src_bps == dst_store
