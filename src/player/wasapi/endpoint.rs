@@ -68,25 +68,29 @@ fn negotiate_format(
 
 pub(super) fn init_exclusive_client(
     device_id: &str,
-) -> Result<(DeviceEnumerator, wasapi::Device), String> {
-    let enumerator = DeviceEnumerator::new().map_err(|e| format!("DeviceEnumerator: {e}"))?;
+) -> Result<(DeviceEnumerator, wasapi::Device), ExclusiveEvent> {
+    let failed = ExclusiveEvent::InitFailed;
+    let enumerator =
+        DeviceEnumerator::new().map_err(|e| failed(format!("DeviceEnumerator: {e}")))?;
 
     // "auto"/"default"/empty are the default-device sentinels: resolve them to the OS default
     // render endpoint instead of a literal device-name lookup.
     let device = if is_default_selector(device_id) || device_id.is_empty() {
         enumerator
             .get_default_device(Direction::Render)
-            .map_err(|e| format!("default device: {e}"))?
+            .map_err(|e| failed(format!("default device: {e}")))?
     } else {
         // `device_id` is cpal's device name: FriendlyName, or DeviceDesc when a driver
         // sets none. Letting cpal resolve it and opening its endpoint id picks the device
         // the shared path would, which matching either property does not guarantee.
         let endpoint = find_output_device(device_id)
             .and_then(|d| d.id().ok())
-            .ok_or_else(|| format!("device '{device_id}': not found"))?;
+            .ok_or_else(|| {
+                ExclusiveEvent::DeviceNotFound(format!("device '{device_id}': not found"))
+            })?;
         enumerator
             .get_device(&endpoint.1)
-            .map_err(|e| format!("device '{device_id}': {e}"))?
+            .map_err(|e| failed(format!("device '{device_id}': {e}")))?
     };
 
     Ok((enumerator, device))

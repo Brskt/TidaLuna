@@ -4,7 +4,45 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Re
 
 use super::mixer::{CrossfadeLink, OutputGain, build_cpal_callback};
 use super::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_UNKNOWN};
-use crate::player::AudioDevice;
+use crate::player::{AudioDevice, DeviceErrorKind};
+
+/// Why an output would not open, as cpal's build error tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::player::thread) enum OpenFailure {
+    Format,
+    Gone,
+    Busy,
+    Other,
+}
+
+impl OpenFailure {
+    /// What the listener hears: only a refused format says "format".
+    pub(in crate::player::thread) fn device_error(self) -> DeviceErrorKind {
+        match self {
+            Self::Format => DeviceErrorKind::FormatNotSupported,
+            Self::Gone => DeviceErrorKind::NotFound,
+            Self::Busy => DeviceErrorKind::Locked,
+            Self::Other => DeviceErrorKind::Unknown,
+        }
+    }
+}
+
+/// Read a failed open from cpal's error kind.
+pub(in crate::player::thread) fn classify_open_error(kind: cpal::ErrorKind) -> OpenFailure {
+    match kind {
+        cpal::ErrorKind::UnsupportedConfig => OpenFailure::Format,
+        cpal::ErrorKind::DeviceNotAvailable => OpenFailure::Gone,
+        cpal::ErrorKind::DeviceBusy => OpenFailure::Busy,
+        _ => OpenFailure::Other,
+    }
+}
+
+/// cpal's WASAPI panics on endpoint calls Microsoft documents as fallible (`Item`, `GetDataFlow`,
+/// `OpenPropertyStore`), and hotplug reaches them while endpoints come and go. Read as the error
+/// cpal would return; drop once the pinned cpal rev returns one there.
+fn without_cpal_panic<T>(failed: T, read: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or(failed)
+}
 
 pub(in crate::player::thread) fn enumerate_audio_devices() -> Vec<AudioDevice> {
     let host = cpal::default_host();
@@ -15,18 +53,22 @@ pub(in crate::player::thread) fn enumerate_audio_devices() -> Vec<AudioDevice> {
         r#type: Some("systemDefault".to_string()),
     }];
 
-    if let Ok(output_devices) = host.output_devices() {
-        for device in output_devices {
-            if let Ok(desc) = device.description() {
-                let name = desc.name().to_string();
-                devices.push(AudioDevice {
-                    controllable_volume: true,
-                    id: name.clone(),
-                    name,
-                    r#type: None,
-                });
-            }
-        }
+    let names = without_cpal_panic(None, || {
+        let outputs = host.output_devices().ok()?;
+        Some(
+            outputs
+                .filter_map(|device| device.description().ok())
+                .map(|desc| desc.name().to_string())
+                .collect::<Vec<_>>(),
+        )
+    });
+    for name in names.into_iter().flatten() {
+        devices.push(AudioDevice {
+            controllable_volume: true,
+            id: name.clone(),
+            name,
+            r#type: None,
+        });
     }
 
     devices
@@ -45,24 +87,39 @@ pub(in crate::player) fn find_output_device(device_id: &str) -> Option<cpal::Dev
         return host.default_output_device();
     }
 
-    host.output_devices().ok()?.find(|d| {
-        d.description()
-            .ok()
-            .map(|desc| desc.name() == device_id)
-            .unwrap_or(false)
+    without_cpal_panic(None, || {
+        host.output_devices().ok()?.find(|d| {
+            d.description()
+                .ok()
+                .map(|desc| desc.name() == device_id)
+                .unwrap_or(false)
+        })
     })
 }
 
 pub(in crate::player::thread) fn output_device_name(device: &cpal::Device) -> Option<String> {
-    device.description().ok().map(|d| d.name().to_string())
+    without_cpal_panic(None, || {
+        device.description().ok().map(|d| d.name().to_string())
+    })
 }
 
-// Resolve a requested id to a concrete device, falling back to the OS default
-// when the id is None or names a device that isn't present.
 pub(in crate::player::thread) fn resolve_device(device_id: Option<&str>) -> Option<cpal::Device> {
-    device_id
-        .and_then(find_output_device)
-        .or_else(|| cpal::default_host().default_output_device())
+    pick_device(device_id, find_output_device, || {
+        cpal::default_host().default_output_device()
+    })
+}
+
+/// The device a request opens: the OS default when nothing was asked, never in place of a named
+/// device that is gone (the official engine answers `notFound` there, with no fallback).
+pub(in crate::player::thread) fn pick_device<D>(
+    device_id: Option<&str>,
+    find: impl FnOnce(&str) -> Option<D>,
+    default: impl FnOnce() -> Option<D>,
+) -> Option<D> {
+    match device_id {
+        Some(id) => find(id),
+        None => default(),
+    }
 }
 
 // Concrete name a request id resolves to: the guard compares physical
@@ -202,12 +259,24 @@ fn attempt_order(source: (u32, u16), device_default: (u32, u16), pinned: bool) -
     }
 }
 
+/// A named device gone between its lookup and this open reaches the same cpal panics.
 pub(in crate::player::thread) fn open_output_stream(
     device: &cpal::Device,
     source_rate: u32,
     source_channels: u16,
     gain: &OutputGain,
-) -> Option<OpenedStream> {
+) -> Result<OpenedStream, OpenFailure> {
+    without_cpal_panic(Err(OpenFailure::Other), || {
+        open_on_device(device, source_rate, source_channels, gain)
+    })
+}
+
+fn open_on_device(
+    device: &cpal::Device,
+    source_rate: u32,
+    source_channels: u16,
+    gain: &OutputGain,
+) -> Result<OpenedStream, OpenFailure> {
     let seek_gen = Arc::new(AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
     let mute_ack = Arc::new(AtomicBool::new(false));
@@ -259,7 +328,7 @@ pub(in crate::player::thread) fn open_output_stream(
                         source_rate
                     );
                 }
-                return Some(opened);
+                return Ok(opened);
             }
             Err(e) => {
                 crate::vprintln!("[CPAL]   Rejected {rate}Hz/{channels}ch: {e}");
@@ -268,10 +337,11 @@ pub(in crate::player::thread) fn open_output_stream(
         }
     }
 
-    if let Some(e) = last_err {
+    // The last attempt's error names the failure: the loop always makes one.
+    Err(last_err.map_or(OpenFailure::Other, |e| {
         crate::vprintln!("[ERROR]  Failed to open cpal stream: {e}");
-    }
-    None
+        classify_open_error(e.kind())
+    }))
 }
 
 #[cfg(test)]

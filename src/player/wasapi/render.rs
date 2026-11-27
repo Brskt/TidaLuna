@@ -674,8 +674,8 @@ fn render_thread_inner(
 
     let (_enumerator, device) = match init_exclusive_client(&device_id) {
         Ok(v) => v,
-        Err(e) => {
-            let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+        Err(event) => {
+            let _ = event_tx.send(event);
             return Err(());
         }
     };

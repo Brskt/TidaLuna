@@ -45,7 +45,6 @@ pub enum DeviceErrorKind {
     ExclusiveModeNotAllowed,
     #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     ExclusiveFormatUnsupported,
-    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     Locked,
     Disconnected,
     Unknown,

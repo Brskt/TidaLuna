@@ -142,6 +142,9 @@ pub(super) enum ExclusiveEvent {
         secs: f64,
     },
     InitFailed(String),
+    /// The requested endpoint is not among the active ones. The official engine answers
+    /// `notFound` there, with no fallback.
+    DeviceNotFound(String),
     DeviceLocked(String),
     /// The device can't do THIS track's rate/bit-depth in exclusive (e.g. 88.2/176.4/192k on a
     /// 96k-max DAC), but exclusive itself works for other rates. Per-track shared fallback,

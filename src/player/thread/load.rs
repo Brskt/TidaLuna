@@ -370,25 +370,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         };
 
         let cpal_start = std::time::Instant::now();
-        let opened =
-            match open_output_stream(
-                &device,
-                source_sample_rate,
-                source_channels,
-                &self.output_gain(),
-            ) {
-                Some(o) => o,
-                None => {
-                    let kind = DeviceErrorKind::FormatNotSupported;
-                    (self.callback)(PlayerEvent::DeviceError(kind));
-                    self.end_failed_track(
-                        "the output device refused the stream format".to_string(),
-                        MediaErrorCode::UnreadableFile,
-                        Some(kind),
-                    );
-                    return false;
-                }
-            };
+        let opened = match open_output_stream(
+            &device,
+            source_sample_rate,
+            source_channels,
+            &self.output_gain(),
+        ) {
+            Ok(o) => o,
+            Err(failure) => {
+                let kind = failure.device_error();
+                (self.callback)(PlayerEvent::DeviceError(kind));
+                self.end_failed_track(
+                    "the output device refused to open".to_string(),
+                    MediaErrorCode::UnreadableFile,
+                    Some(kind),
+                );
+                return false;
+            }
+        };
         let cpal_ms = cpal_start.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!("[LOAD #{load_gen}] cpal open: {}", format_ms(cpal_ms));
 

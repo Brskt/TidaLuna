@@ -631,9 +631,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let device = self.resolve_output_device()?;
 
         let opened = match open_output_stream(&device, sr, ch, &self.output_gain()) {
-            Some(o) => o,
-            None => {
-                let kind = DeviceErrorKind::FormatNotSupported;
+            Ok(o) => o,
+            Err(failure) => {
+                let kind = failure.device_error();
                 (self.callback)(PlayerEvent::DeviceError(kind));
                 return Err(kind);
             }
@@ -728,23 +728,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn resolve_output_device(&mut self) -> Result<cpal::Device, DeviceErrorKind> {
         match super::output::resolve_device(self.current_device_id.as_deref()) {
             Some(d) => {
-                let name = super::output::output_device_name(&d);
+                self.current_output_name = super::output::output_device_name(&d);
                 self.output_is_default = self
                     .current_device_id
                     .as_deref()
                     .is_none_or(super::output::is_default_selector);
-                // A named (non-default) request that didn't resolve to itself fell
-                // back to the OS default.
-                if !self.output_is_default
-                    && let Some(req) = self.current_device_id.as_deref()
-                    && name.as_deref() != Some(req)
-                {
-                    crate::vprintln!(
-                        "[AUDIO] Device '{}' not found, falling back to default",
-                        req
-                    );
-                }
-                self.current_output_name = name;
                 Ok(d)
             }
             None => {

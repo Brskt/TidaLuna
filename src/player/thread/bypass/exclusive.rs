@@ -273,6 +273,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.duration_announced = true;
                             }
                         }
+                        ExclusiveEvent::DeviceNotFound(e) => {
+                            crate::vprintln!("[WASAPI] Device not found: {e}");
+                            if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+                            self.is_exclusive_mode = false;
+                            // No shared replay: it would open the same gone device and report
+                            // it a second time. The page stops on `devicenotfound` by itself.
+                            self.release_failed_exclusive_track();
+                            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
+                        }
                         ExclusiveEvent::InitFailed(e) => {
                             crate::vprintln!(
                                 "[WASAPI] Init failed, falling back to shared mode: {e}"
@@ -389,19 +400,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// `kind` is the failure just reported, which ends a track nothing can re-arm.
     #[cfg(target_os = "windows")]
     pub(super) fn rearm_shared_after_exclusive_failure(&mut self, kind: DeviceErrorKind) {
-        let had_track = self.has_track;
-        let was_playing = self.is_playing;
-        self.has_track = false;
-        self.is_playing = false;
-        self.loading_gen = None;
-        self.pending_play = None;
-        self.seeking = false;
-        self.seek_target = None;
-        self.exclusive_seek_tx = None;
-        // No render thread is left behind a refusal to own this stream. The panic gate keys on
-        // the mode, which each refusal arm clears before the gate runs, not on this id. The
-        // ASIO twin keeps its id: no ASIO refusal ends its control thread.
-        self.current_exclusive_stream_id = None;
+        let (had_track, was_playing) = self.release_failed_exclusive_track();
 
         // Prefer the live exclusive position (floor-free); fall back to resume_store.
         let retained = super::super::retained_track();
@@ -426,5 +425,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 );
             }
         }
+    }
+
+    /// Drops the transport state of a refused exclusive stream; returns whether a track was
+    /// held and whether it was playing.
+    fn release_failed_exclusive_track(&mut self) -> (bool, bool) {
+        let had_track = self.has_track;
+        let was_playing = self.is_playing;
+        self.has_track = false;
+        self.is_playing = false;
+        self.loading_gen = None;
+        self.pending_play = None;
+        self.seeking = false;
+        self.seek_target = None;
+        self.exclusive_seek_tx = None;
+        // No render thread is left behind a refusal to own this stream. The panic gate keys on
+        // the mode, which each refusal arm clears before the gate runs, not on this id. The
+        // ASIO twin keeps its id: no ASIO refusal ends its control thread.
+        self.current_exclusive_stream_id = None;
+        (had_track, was_playing)
     }
 }
